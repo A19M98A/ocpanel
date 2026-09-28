@@ -1,0 +1,13 @@
+# Virtualenv created by install.sh
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# macOS
+.DS_Store

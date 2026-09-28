@@ -1,0 +1,173 @@
+/* ocpanel - every colour here is a theme variable, so Ctrl+P -> "Change theme"
+   restyles the whole panel. */
+
+Screen {
+    background: $background;
+}
+
+/* ---------------------------------------------------------------- top bar */
+
+StatusBar {
+    dock: top;
+    height: 1;
+    background: $surface;
+}
+#sb-left  { width: 1fr; height: 1; }
+#sb-right { width: auto; height: 1; }
+
+#banner {
+    dock: top;
+    height: 1;
+    padding: 0 1;
+    background: $warning 25%;
+    color: $warning;
+    text-style: bold;
+    display: none;
+}
+#banner.visible { display: block; }
+
+/* ----------------------------------------------------------------- panels */
+
+#panels {
+    height: 10;
+    padding: 1 1 0 1;
+}
+
+.panel {
+    width: 1fr;
+    height: 100%;
+    margin: 0 1;
+    padding: 0 2;
+    background: $surface;
+    border: round $panel;
+    border-title-color: $text-muted;
+    border-title-style: bold;
+}
+#conn.online  { border: round $success 60%; }
+#conn.offline { border: round $error 70%; }
+
+#traffic { layout: vertical; }
+.traffic-label { height: 1; }
+.traffic-spark { height: 2; margin-bottom: 0; }
+#tun-spark > .sparkline--max-color { color: $secondary; }
+#tun-spark > .sparkline--min-color { color: $secondary 45%; }
+#dir-spark > .sparkline--max-color { color: $accent; }
+#dir-spark > .sparkline--min-color { color: $accent 45%; }
+
+/* ------------------------------------------------------------------ rules */
+
+#rules-wrap {
+    height: 1fr;
+    margin: 1 2 0 2;
+    background: $surface;
+    border: round $panel;
+    border-title-color: $foreground;
+    border-title-style: bold;
+    border-subtitle-color: $text-muted;
+}
+#rules-wrap:focus-within { border: round $primary 70%; }
+
+#lists { height: 1fr; }
+#lists ContentSwitcher { height: 1fr; }
+#lists TabPane { padding: 0; height: 1fr; }
+
+DataTable {
+    height: 1fr;
+    background: $surface;
+    scrollbar-size-vertical: 1;
+}
+DataTable > .datatable--header { background: $surface; color: $text-muted; text-style: bold; }
+DataTable > .datatable--even-row { background: $boost; }
+DataTable > .datatable--cursor { background: $primary 20%; }
+DataTable:focus > .datatable--cursor { background: $primary 40%; }
+
+.empty {
+    height: 1fr;
+    content-align: center middle;
+    text-align: center;
+    padding: 1 4;
+}
+
+#filter {
+    dock: bottom;
+    margin: 0 1;
+    border: tall $primary;
+}
+
+/* --------------------------------------------------------------- activity */
+
+#activity {
+    height: 8;
+    margin: 1 2;
+    padding: 0 1;
+    background: $surface;
+    border: round $panel;
+    border-title-color: $text-muted;
+    border-title-style: bold;
+    scrollbar-size-vertical: 1;
+}
+
+/* ---------------------------------------------------------------- dialogs */
+
+ModalScreen {
+    align: center middle;
+    background: $background 70%;
+}
+
+#dialog {
+    width: 76;
+    max-width: 95%;
+    height: auto;
+    max-height: 90%;
+    padding: 1 2;
+    background: $surface;
+    border: round $primary;
+}
+#dialog.wide   { width: 104; }
+#dialog.danger { border: round $error; }
+#dialog.help   { height: 90%; }
+#help-body     { height: 1fr; }
+
+#dialog .title {
+    width: 100%;
+    text-style: bold;
+    color: $foreground;
+    padding-bottom: 1;
+}
+#dialog.danger .title { color: $error; }
+
+#dialog .body {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    padding-bottom: 1;
+}
+#dialog .field { color: $text-muted; text-style: bold; }
+#dialog .kind  { height: 1; padding: 0 1; margin-bottom: 1; }
+
+#dialog .keys {
+    width: 100%;
+    height: 1;
+    margin-top: 1;
+}
+#dialog .footer {
+    height: auto;
+    margin-top: 1;
+    align-horizontal: right;
+}
+#dialog .footer Button { margin-left: 1; min-width: 12; }
+#dialog Button:focus { text-style: bold; }
+
+/* A ticked box has to read as ticked at a glance. */
+#dialog SelectionList {
+    height: auto;
+    max-height: 18;
+    padding: 0 1;
+    background: $background;
+    border: round $panel;
+}
+#dialog SelectionList:focus { border: round $primary 70%; }
+#dialog SelectionList > .selection-list--button { background: $panel; color: $panel; }
+#dialog SelectionList > .selection-list--button-highlighted { background: $surface; color: $surface; }
+#dialog SelectionList > .selection-list--button-selected { background: $success; color: $success; }
+#dialog SelectionList > .selection-list--button-selected-highlighted { background: $success; color: $background; }

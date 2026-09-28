@@ -1,0 +1,260 @@
+"""Read-only inspection of the macOS routing table, interfaces and openconnect."""
+from __future__ import annotations
+
+import ipaddress
+import re
+import socket
+import subprocess
+import time
+from dataclasses import dataclass, field
+
+TUNNEL_PREFIXES = ("utun", "ppp", "ipsec", "tun")
+
+
+def _run(cmd: list[str], timeout: float = 5.0) -> str:
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.stdout
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def is_tunnel(iface: str) -> bool:
+    return iface.startswith(TUNNEL_PREFIXES)
+
+
+@dataclass
+class Link:
+    """One default route: where traffic goes and over which interface."""
+    gateway: str
+    iface: str
+
+    @property
+    def tunnelled(self) -> bool:
+        return is_tunnel(self.iface)
+
+
+def default_routes() -> list[Link]:
+    out = _run(["netstat", "-rn", "-f", "inet"])
+    links: list[Link] = []
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) >= 4 and f[0] == "default":
+            gw, iface = f[1], f[-1]
+            if iface.isdigit() or "." in iface:      # Expire column present
+                iface = f[-2]
+            links.append(Link(gw, iface))
+    return links
+
+
+def physical_link() -> Link | None:
+    """The default route that does NOT go through a tunnel - our bypass path."""
+    for link in default_routes():
+        if not link.tunnelled:
+            return link
+    return None
+
+
+def tunnel_link() -> Link | None:
+    for link in default_routes():
+        if link.tunnelled:
+            return link
+    return None
+
+
+def iface_addr(iface: str) -> str:
+    out = _run(["ifconfig", iface])
+    m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", out)
+    return m.group(1) if m else ""
+
+
+def route_iface(target: str) -> str:
+    """Which interface the kernel would actually use for `target` right now."""
+    out = _run(["route", "-n", "get", target])
+    m = re.search(r"^\s*interface:\s*(\S+)", out, re.M)
+    return m.group(1) if m else ""
+
+
+def iface_bytes(iface: str) -> tuple[int, int]:
+    """(rx, tx) byte counters for an interface.
+
+    Point-to-point links (utun) have no hardware address, so the Address column
+    is missing and the fixed column numbers shift. The trailing columns are
+    stable on both, so index from the end of the <Link#..> row.
+    """
+    out = _run(["netstat", "-I", iface, "-b", "-n"])
+    for line in out.splitlines()[1:]:
+        f = line.split()
+        if len(f) >= 6 and f[0] == iface and f[2].startswith("<Link"):
+            try:
+                return int(f[-5]), int(f[-2])
+            except (ValueError, IndexError):
+                continue
+    return 0, 0
+
+
+@dataclass
+class Session:
+    pid: int
+    server: str
+    user: str
+    argv: list[str] = field(default_factory=list)
+    started: float = 0.0
+
+
+def openconnect_sessions() -> list[Session]:
+    """Find running openconnect processes, skipping the sudo wrappers."""
+    out = _run(["ps", "-axo", "pid=,lstart=,command="])
+    found: list[Session] = []
+    for line in out.splitlines():
+        m = re.match(r"\s*(\d+)\s+(\w{3} \w{3} +\d+ [\d:]+ \d{4})\s+(.*)$", line)
+        if not m:
+            continue
+        pid, when, cmd = int(m.group(1)), m.group(2), m.group(3)
+        argv = cmd.split()
+        exe = argv[0].rsplit("/", 1)[-1] if argv else ""
+        if exe == "sudo":                      # report the real process, not the wrapper
+            continue
+        if exe != "openconnect":
+            continue
+        user, server = "", ""
+        for i, a in enumerate(argv[1:], 1):
+            if a in ("-u", "--user") and i + 1 < len(argv):
+                user = argv[i + 1]
+            elif a.startswith("--user="):
+                user = a.split("=", 1)[1]
+            elif not a.startswith("-") and argv[i - 1] not in ("-u", "--user", "--protocol", "-c", "-k"):
+                server = a
+        try:
+            started = time.mktime(time.strptime(when, "%a %b %d %H:%M:%S %Y"))
+        except ValueError:
+            started = 0.0
+        found.append(Session(pid=pid, server=server, user=user, argv=argv, started=started))
+    return found
+
+
+def resolve(host: str) -> list[str]:
+    """Resolve a hostname to its IPv4 addresses."""
+    try:
+        infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError):
+        return []
+    return sorted({i[4][0] for i in infos})
+
+
+def dns_servers() -> list[str]:
+    out = _run(["scutil", "--dns"])
+    return sorted({m for m in re.findall(r"nameserver\[\d+\] : (\S+)", out)})
+
+
+GAME_PROCESS_HINTS = ("dota", "steam", "csgo", "cs2", "hl2", "srcds", "paladins",
+                      "smite", "realmroyale", "hirez", "unreal")
+
+
+@dataclass
+class Peer:
+    """A live connection from a game/launcher process to somewhere outside."""
+    process: str
+    pid: int
+    proto: str
+    local: str
+    remote: str
+    port: int
+
+
+def _routable(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return not (addr.is_private or addr.is_loopback or addr.is_multicast
+                or addr.is_link_local or addr.is_unspecified)
+
+
+def live_peers(hints: tuple[str, ...] = GAME_PROCESS_HINTS) -> list[Peer]:
+    """Current outbound connections belonging to game processes.
+
+    Run as root this sees every user's sockets; unprivileged it sees only yours,
+    which is still enough when the game runs as you.
+    """
+    out = _run(["lsof", "-i", "-n", "-P"], timeout=15.0)
+    peers: dict[tuple[str, int], Peer] = {}
+    for line in out.splitlines()[1:]:
+        f = line.split()
+        if len(f) < 9:
+            continue
+        command, pid_s, proto, name = f[0], f[1], f[7], f[8]
+        if not any(h in command.lower() for h in hints):
+            continue
+        if proto not in ("TCP", "UDP") or "->" not in name:
+            continue
+        local, _, remote = name.partition("->")
+        host, _, port_s = remote.rpartition(":")
+        if not _routable(host):
+            continue
+        try:
+            pid, port = int(pid_s), int(port_s)
+        except ValueError:
+            continue
+        peers.setdefault((host, port), Peer(command, pid, proto, local, host, port))
+    return sorted(peers.values(), key=lambda p: (p.remote, p.port))
+
+
+def route_info(target: str) -> dict[str, str]:
+    """The kernel's routing decision for one address, as key/value pairs."""
+    out = _run(["route", "-n", "get", target])
+    info: dict[str, str] = {}
+    for line in out.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip() in ("destination", "mask", "gateway", "interface"):
+            info[key.strip()] = value.strip()
+    return info
+
+
+def reached_via_router(target: str) -> bool:
+    """True when `target` is not on the local link, i.e. traffic to it passes a gateway.
+
+    A resolver on your own LAN (the Wi-Fi router) answers either way; one that
+    sits out on the internet is exactly what a VPN is protecting.
+    """
+    info = route_info(target)
+    return bool(info.get("gateway")) or is_tunnel(info.get("interface", ""))
+
+
+def _expand_dest(dest: str) -> ipaddress.IPv4Network | None:
+    """netstat abbreviates destinations: '128.0/1' means 128.0.0.0/1."""
+    if dest == "default":
+        return ipaddress.ip_network("0.0.0.0/0")
+    addr, sep, plen = dest.partition("/")
+    parts = addr.split(".")
+    if not sep or not 1 <= len(parts) <= 4:
+        return None
+    try:
+        return ipaddress.ip_network(f"{'.'.join(parts + ['0'] * (4 - len(parts)))}/{plen}")
+    except ValueError:
+        return None
+
+
+HALF_DEFAULTS = ("0.0.0.0/1", "128.0.0.0/1")
+
+
+def half_default_routes() -> dict[str, Link]:
+    """The two /1 routes that together cover everything, if installed.
+
+    They are more specific than any 'default' route, so whoever owns them owns
+    all traffic that has no more specific route of its own.
+    """
+    out = _run(["netstat", "-rn", "-f", "inet"])
+    found: dict[str, Link] = {}
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) < 4:
+            continue
+        net = _expand_dest(f[0])
+        if net is None or str(net) not in HALF_DEFAULTS:
+            continue
+        iface = f[-1]
+        if iface.isdigit() or "." in iface:
+            iface = f[-2]
+        found[str(net)] = Link(f[1], iface)
+    return found
