@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 import socket
 import subprocess
@@ -9,6 +10,20 @@ import time
 from dataclasses import dataclass, field
 
 TUNNEL_PREFIXES = ("utun", "ppp", "ipsec", "tun")
+
+
+def _run_as_user(cmd: list[str], timeout: float = 10.0) -> str:
+    """Run a command as the human who started the panel.
+
+    NetworkExtension VPN configurations live in the user's own preferences, so
+    `scutil --nc` run as root (under sudo) sees nothing. Same trick as keychain.py.
+    """
+    out = ""
+    if os.geteuid() == 0:
+        user = os.environ.get("SUDO_USER")
+        if user:
+            out = _run(["sudo", "-u", user, *cmd], timeout)
+    return out or _run(cmd, timeout)
 
 
 def _run(cmd: list[str], timeout: float = 5.0) -> str:
@@ -258,3 +273,102 @@ def half_default_routes() -> dict[str, Link]:
             iface = f[-2]
         found[str(net)] = Link(f[1], iface)
     return found
+
+
+# ---------------------------------------------------------------- providers
+#
+# ocpanel does not care which program built the tunnel - it works on the
+# routing table. But to show what you are connected to, and to offer to
+# stop/start it, it has to recognise the usual owners:
+#   openconnect   a process we launched or adopted
+#   ne-vpn        a macOS NetworkExtension VPN (V2Box, and most VLESS /
+#                 VMess / Trojan / WireGuard clients shipped as .appex)
+#   unknown       a tunnel is up, but nothing recognisable owns it
+
+NE_LIST = re.compile(
+    r'^\s*(?P<enabled>\*|\s)\s*\((?P<status>\w+)\)\s+(?P<id>\S+)\s+(?P<type>\S+)'
+    r'\s+\((?P<bundle>[^)]*)\)\s+"(?P<name>[^"]*)"')
+
+
+@dataclass
+class NEService:
+    """A VPN configuration macOS knows about, from `scutil --nc list`."""
+    name: str
+    status: str
+    identifier: str
+    bundle: str
+    enabled: bool
+
+    @property
+    def connected(self) -> bool:
+        return self.status.lower() == "connected"
+
+
+def ne_vpn_services() -> list[NEService]:
+    out = _run_as_user(["scutil", "--nc", "list"])
+    found = []
+    for line in out.splitlines():
+        m = NE_LIST.match(line)
+        if m:
+            found.append(NEService(name=m["name"], status=m["status"],
+                                   identifier=m["id"], bundle=m["bundle"],
+                                   enabled=m["enabled"] == "*"))
+    return found
+
+
+@dataclass
+class Provider:
+    """Whatever owns the tunnel at the moment, however it was started."""
+    kind: str                       # openconnect | ne-vpn | unknown
+    name: str                       # what to show: "openconnect", "V2BOX" ...
+    server: str = ""
+    user: str = ""
+    pid: int | None = None
+    service: str | None = None      # NE name, for scutil --nc
+    bundle: str = ""
+    started: float = 0.0
+    iface: str = ""
+    status: str = "Connected"       # a system VPN can also be mid-connect
+
+    @property
+    def connecting(self) -> bool:
+        return self.status.lower() in ("connecting", "reasserting", "disconnecting")
+
+    @property
+    def controllable(self) -> bool:
+        """Can the panel stop this one, or is it someone else's business?"""
+        return self.kind == "openconnect" and self.pid is not None or (
+            self.kind == "ne-vpn" and bool(self.service))
+
+    @property
+    def label(self) -> str:
+        if self.kind == "ne-vpn":
+            return f"{self.name} (system VPN)"
+        return self.name
+
+
+def tunnel_provider() -> Provider | None:
+    """Who is carrying the traffic right now.
+
+    A tunnel may exist with nobody recognisable behind it - that is still
+    reported, because the routing side works either way.
+    """
+    tunnel = tunnel_link()
+    sessions = openconnect_sessions()
+    if sessions:
+        s = sessions[0]
+        return Provider(kind="openconnect", name="openconnect", server=s.server,
+                        user=s.user, pid=s.pid, started=s.started,
+                        iface=tunnel.iface if tunnel else "")
+    # A system VPN that is still coming up counts too: it is why the tunnel
+    # blinks out for a moment, and the panel should say so rather than claim
+    # nothing is connected.
+    for svc in ne_vpn_services():
+        if svc.connected or svc.status.lower() in ("connecting", "reasserting"):
+            return Provider(kind="ne-vpn", name=svc.name, server=svc.name,
+                            service=svc.name, bundle=svc.bundle,
+                            status=svc.status,
+                            iface=tunnel.iface if tunnel else "")
+    if tunnel is not None:
+        return Provider(kind="unknown", name=tunnel.iface, iface=tunnel.iface)
+    return None

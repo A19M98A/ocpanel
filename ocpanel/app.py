@@ -49,7 +49,7 @@ class Snapshot:
     tunnel: netinfo.Link | None = None
     physical: netinfo.Link | None = None
     tunnel_addr: str = ""
-    session: netinfo.Session | None = None
+    provider: netinfo.Provider | None = None   # whoever owns the tunnel
     dns: list[str] = field(default_factory=list)
     rx_tun: int = 0
     tx_tun: int = 0
@@ -175,9 +175,10 @@ class OCPanel(App):
         if action == "undo":
             return True if self._undo else None
         if action in ("connect", "connect_in_terminal"):
-            return True if self.snap.session is None and not self._connecting else None
+            return True if self.snap.provider is None and not self._connecting else None
         if action == "disconnect":
-            return True if self.snap.session is not None else None
+            p = self.snap.provider
+            return True if p is not None and p.controllable else None
         if action == "reconnect":
             return None if self._connecting else True
         if action == "forget_password":
@@ -218,8 +219,7 @@ class OCPanel(App):
             snap.rx_tun, snap.tx_tun = netinfo.iface_bytes(snap.tunnel.iface)
         if snap.physical:
             snap.rx_phy, snap.tx_phy = netinfo.iface_bytes(snap.physical.iface)
-        sessions = netinfo.openconnect_sessions()
-        snap.session = sessions[0] if sessions else None
+        snap.provider = netinfo.tunnel_provider()
         snap.dns = netinfo.dns_servers()
         snap.halves = netinfo.half_default_routes()
         unused = self.cfg.rules if self.direct_mode else self.cfg.vpn_rules
@@ -289,17 +289,17 @@ class OCPanel(App):
         left.append("   ")
         if self._connecting:
             left.append("◐ connecting…", style=f"bold {p.warn}")
-        elif s.session is not None and s.tunnel is not None:
+        elif s.provider is not None and s.tunnel is not None:
             left.append("● connected", style=f"bold {p.ok}")
-        elif s.session is not None:
+        elif s.provider is not None:
             left.append("◐ connecting", style=f"bold {p.warn}")
         else:
             left.append("○ disconnected", style=f"bold {p.bad}")
-        server = (s.session.server if s.session else "") or self.cfg.profile.server
+        server = (s.provider.label if s.provider else "") or self.cfg.profile.server
         if server:
             left.append(f"   {server}", style=p.fg)
-        if s.session and s.session.started:
-            left.append(f"   up {human_secs(time.time() - s.session.started)}", style=p.muted)
+        if s.provider and s.provider.started:
+            left.append(f"   up {human_secs(time.time() - s.provider.started)}", style=p.muted)
         state = self.direct_routes_state()
         if state != "ok" and self._prev is not None:
             left.append(f"   ! direct routes {state} - press p", style=f"bold {p.warn}")
@@ -313,10 +313,10 @@ class OCPanel(App):
 
     def render_panels(self) -> None:
         s, p = self.snap, self.pal
-        online = s.session is not None and s.tunnel is not None
+        online = s.provider is not None and s.tunnel is not None
         if online:
             state = Text("● Connected", style=f"bold {p.ok}")
-        elif s.session is not None:
+        elif s.provider is not None:
             state = Text("◐ Connecting", style=f"bold {p.warn}")
         else:
             state = Text("○ Disconnected", style=f"bold {p.bad}")
@@ -325,12 +325,13 @@ class OCPanel(App):
         conn.set_class(not online, "offline")
         conn.set_rows([
             ("Status", state),
-            ("Server", (s.session.server if s.session else "") or self.cfg.profile.server or "-"),
-            ("User", (s.session.user if s.session else "") or self.cfg.profile.user or "-"),
+            ("Carried by", Text(s.provider.label, style=p.fg) if s.provider
+             else Text("nothing - no tunnel", style=p.muted)),
+            ("Server", (s.provider.server if s.provider else "") or self.cfg.profile.server or "-"),
             ("Tunnel", f"{s.tunnel.iface} · {s.tunnel_addr}" if s.tunnel else "-"),
-            ("Uptime", human_secs(time.time() - s.session.started)
-             if s.session and s.session.started else "-"),
-            ("PID", str(s.session.pid) if s.session else "-"),
+            ("Uptime", human_secs(time.time() - s.provider.started)
+             if s.provider and s.provider.started else "-"),
+            ("PID", str(s.provider.pid) if s.provider and s.provider.pid else "-"),
             ("Password", "from auth_command" if self.cfg.profile.auth_command else
              (Text("saved in keychain", style=p.ok) if self.cfg.profile.save_password
               else "asked each time")),
@@ -1156,8 +1157,10 @@ class OCPanel(App):
 
     def action_connect(self) -> None:
         """Ask for what openconnect needs, then connect without blocking the panel."""
-        if self.snap.session is not None or self._connecting:
-            self.notify("openconnect is already running.", severity="warning")
+        if self.snap.provider is not None or self._connecting:
+            self.notify(f"Already connected through {self.snap.provider.label}."
+                        if self.snap.provider else "A connection is already starting.",
+                        severity="warning")
             return
         self.ask_to_connect("Connect", self.start_connect)
 
@@ -1165,26 +1168,53 @@ class OCPanel(App):
         """Take the tunnel down and bring it straight back up."""
         if self._connecting:
             return
-        session = self.snap.session
+        provider = self.snap.provider
+        if provider is not None and provider.kind == "ne-vpn":
+            # A system VPN (V2Box and friends): macOS restarts it by name, and
+            # it needs no credentials from us.
+            def restart(yes: bool) -> None:
+                if yes:
+                    self._ne_reconnect(provider.service)
+
+            self.push_screen(ConfirmScreen(
+                f"Reconnect {provider.name}?",
+                f"macOS stops and restarts {provider.name}. Every connection going "
+                "through the tunnel right now will drop, and the panel re-applies "
+                "your routes once it is back.", "Reconnect"), restart)
+            return
+        if provider is not None and not provider.controllable:
+            self.notify(f"{provider.label} was not started by the panel and cannot "
+                        "be restarted from here.", severity="warning")
+            return
 
         def go(server: str, user: str, password: str | None, remember: bool) -> None:
-            if session is None:
+            if provider is None:
                 self.start_connect(server, user, password, remember)
                 return
 
             def confirmed(yes: bool) -> None:
                 if yes:
                     self.start_connect(server, user, password, remember,
-                                       replace=session.pid)
+                                       replace=provider.pid)
 
             self.push_screen(ConfirmScreen(
                 f"Reconnect to {server}?",
-                f"openconnect (pid {session.pid}) is stopped and started again. "
+                f"openconnect (pid {provider.pid}) is stopped and started again. "
                 "Every connection going through the tunnel right now will drop, "
                 "and the panel re-applies your routes once it is back.",
                 "Reconnect"), confirmed)
 
         self.ask_to_connect("Reconnect", go)
+
+    @work(exclusive=True, thread=True, group="connect")
+    def _ne_reconnect(self, name: str) -> None:
+        ok, detail = vpn.ne_stop(name)
+        self.call_from_thread(self.log_line, f"{escape(detail)}",
+                              "yellow" if ok else "red")
+        if ok:
+            ok, detail = vpn.ne_start(name)
+        self.call_from_thread(self.connect_finished,
+                              vpn.Attempt(ok, detail), None)
 
     def action_forget_password(self) -> None:
         gone, detail = kc.forget(self.account())
@@ -1257,8 +1287,8 @@ class OCPanel(App):
 
     def action_connect_in_terminal(self) -> None:
         """Fallback: let openconnect talk to the terminal, for 2FA and the like."""
-        if self.snap.session is not None or self._connecting:
-            self.notify("openconnect is already running.", severity="warning")
+        if self.snap.provider is not None or self._connecting:
+            self.notify("Already connected.", severity="warning")
             return
         profile = self.cfg.profile
         if not profile.server:
@@ -1282,7 +1312,9 @@ class OCPanel(App):
         """Offer to take the VPN down with the panel, as configured."""
         if isinstance(self.screen, ModalScreen) or self._quitting:
             return                               # a dialog is already asking something
-        if not (self.cfg.disconnect_on_quit and self.snap.session is not None):
+        provider = self.snap.provider
+        if not (self.cfg.disconnect_on_quit and provider is not None
+                and provider.controllable):
             self.exit()
             return
 
@@ -1292,42 +1324,58 @@ class OCPanel(App):
             elif choice == "disconnect":
                 self._quitting = True
                 self.log_line("disconnecting before quitting…", "bold")
-                self._quit_worker(self.snap.session.pid, self.direct_mode)
+                self._quit_worker(provider, self.direct_mode)
 
-        self.push_screen(QuitScreen(self.snap.session.server or
-                                    self.cfg.profile.server or "the VPN"), chosen)
+        self.push_screen(QuitScreen(provider.label), chosen)
 
     @work(thread=True, group="quit")
-    def _quit_worker(self, pid: int, direct: bool) -> None:
+    def _quit_worker(self, provider: netinfo.Provider, direct: bool) -> None:
         if direct and R.is_root():
             # Half-default routes with no tunnel behind them are a trap: they
             # point at a gateway that will be wrong on the next network.
             self.call_from_thread(self.remove_direct)
-        ok, detail = vpn.disconnect(pid)
+        if provider.kind == "ne-vpn":
+            ok, detail = vpn.ne_stop(provider.service)
+        else:
+            ok, detail = vpn.disconnect(provider.pid)
+            if ok:
+                vpn.wait_gone(provider.pid, timeout=10)
         self.call_from_thread(self.log_line, f"disconnect: {escape(detail)}",
                               "yellow" if ok else "red")
-        if ok:
-            vpn.wait_gone(pid, timeout=10)
         self.call_from_thread(self.exit)
 
     def action_disconnect(self) -> None:
-        session = self.snap.session
-        if session is None:
+        provider = self.snap.provider
+        if provider is None:
             self.notify("Nothing to disconnect.", severity="warning")
+            return
+        if not provider.controllable:
+            self.notify(f"{provider.label} is not something the panel can stop.",
+                        severity="warning", title="Not ours to stop")
             return
 
         def confirmed(yes: bool) -> None:
-            if not yes:
-                return
-            ok, detail = vpn.disconnect(session.pid)
-            self.log_line(f"disconnect: {escape(detail)}", "yellow" if ok else "red")
-            self.poll()
+            if yes:
+                self._stop_provider(provider)
 
-        self.push_screen(ConfirmScreen(
-            f"Disconnect {session.server}?",
-            f"This stops openconnect (pid {session.pid}). Every connection going "
-            "through the tunnel right now will drop.", "Disconnect", danger=True),
-            confirmed)
+        if provider.kind == "ne-vpn":
+            detail = (f"macOS stops {provider.name}. Every connection going through "
+                      "the tunnel right now will drop.")
+        else:
+            detail = (f"This stops openconnect (pid {provider.pid}). Every connection "
+                      "going through the tunnel right now will drop.")
+        self.push_screen(ConfirmScreen(f"Disconnect {provider.label}?", detail,
+                                       "Disconnect", danger=True), confirmed)
+
+    @work(exclusive=True, thread=True, group="connect")
+    def _stop_provider(self, provider: netinfo.Provider) -> None:
+        if provider.kind == "ne-vpn":
+            ok, detail = vpn.ne_stop(provider.service)
+        else:
+            ok, detail = vpn.disconnect(provider.pid)
+        self.call_from_thread(self.log_line, f"disconnect: {escape(detail)}",
+                              "yellow" if ok else "red")
+        self.call_from_thread(self.poll)
 
 
 def reset_routes() -> int:

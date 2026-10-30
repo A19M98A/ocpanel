@@ -61,11 +61,12 @@ KEYMAP: list[tuple[str, list[Key]]] = [
         Key("r", "refresh", "Refresh, and reload the config file from disk"),
     ]),
     ("Connection", [
-        Key("c", "connect", "Connect - asks for your password, then runs in the background"),
+        Key("c", "connect", "Connect with openconnect - asks for your password, "
+            "then runs in the background"),
         Key("C", "connect_in_terminal",
             "Connect in the terminal, if the server asks for more than a password"),
-        Key("R", "reconnect", "Reconnect - disconnect, then connect again"),
-        Key("D", "disconnect", "Disconnect openconnect"),
+        Key("R", "reconnect", "Reconnect the current tunnel (openconnect or a system VPN)"),
+        Key("D", "disconnect", "Disconnect the current tunnel"),
         Key("F", "forget_password", "Forget the saved password"),
     ]),
     ("App", [

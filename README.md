@@ -1,16 +1,20 @@
 # ocpanel
 
-**Split tunnelling for OpenConnect on macOS — from the client side, while the VPN is running.**
+**Split tunnelling on macOS — for OpenConnect and for system VPNs like V2Box — from the
+client side, while the tunnel is running.**
 
 [![macOS](https://img.shields.io/badge/macOS-11%2B-black?logo=apple&logoColor=white)](#requirements)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](#requirements)
 [![Built with Textual](https://img.shields.io/badge/built%20with-Textual-5A2CA0)](https://textual.textualize.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A terminal panel for [OpenConnect](https://www.infradead.org/openconnect/). Decide what
-goes through the tunnel and what goes around it, watch it take effect, and connect or
-disconnect without leaving the panel. Your VPN server does not need to cooperate and does
-not need to know: everything happens in your Mac's routing table.
+A terminal panel for [OpenConnect](https://www.infradead.org/openconnect/) and for any VPN
+that macOS runs as a system tunnel — V2Box, and other VLESS / VMess / Trojan / WireGuard
+clients shipped as a NetworkExtension. Decide what goes through the tunnel and what goes
+around it, watch it take effect, and connect or disconnect without leaving the panel.
+
+ocpanel works on the **routing table**, not on the protocol, so it does not care who built
+the tunnel. Your VPN server does not need to cooperate and does not need to know.
 
 ![The ocpanel main screen](docs/panel.png)
 
@@ -28,6 +32,8 @@ worked.
 
 ## Features
 
+- **Works with whatever owns the tunnel.** openconnect, or a system VPN like V2Box. The
+  panel shows which one is carrying your traffic and can stop or restart either.
 - **Two directions, one keypress.** *VPN by default* with a bypass list, or *direct by
   default* with a VPN list. `m` switches; each mode keeps its own list.
 - **It tells you the truth.** Every rule shows the interface the kernel *actually* uses for
@@ -49,7 +55,7 @@ worked.
 | | |
 |---|---|
 | OS | macOS (11 or newer; uses BSD `route`, `netstat`, `scutil`, `security`) |
-| VPN client | [`openconnect`](https://formulae.brew.sh/formula/openconnect) — `brew install openconnect` |
+| VPN client | [`openconnect`](https://formulae.brew.sh/formula/openconnect) (`brew install openconnect`), **or** any client macOS registers as a system VPN (V2Box, WireGuard…) |
 | Python | 3.10+ |
 | Privileges | `sudo` to change routes. Without it the panel runs read-only. |
 
@@ -91,6 +97,22 @@ keychain are still read as *you*, not as root.
 4. Watch the **Route** column: green means the kernel is sending it where this mode wants
    it, red means it is not.
 5. Press **`?`** for every key.
+
+## What it can drive
+
+| Owner of the tunnel | Shown as | `c` connect | `R` reconnect | `D` disconnect |
+|---|---|---|---|---|
+| `openconnect` | `openconnect` + pid | yes | yes | yes |
+| System VPN (NetworkExtension) — V2Box, WireGuard… | e.g. `V2BOX (system VPN)` | start it in its own app | yes, via `scutil --nc` | yes |
+| Anything else holding a `utun` default route | the interface name | no | no | no — but the routing still works |
+
+For a system VPN the panel never needs your credentials: macOS starts and stops the
+configuration by name, and the client handles its own protocol.
+
+> **A proxy is not a tunnel.** If your client runs as a local SOCKS/HTTP proxy
+> (`127.0.0.1:1080`) instead of a TUN interface, the routing table is not involved and
+> ocpanel can do nothing for it. Use the client's own routing rules — V2Ray/Xray can match
+> on domains (`geosite:google`), which is strictly more capable than IP routes.
 
 ## Two modes
 
@@ -181,10 +203,10 @@ the one you are using; `f` reads the running game's actual sockets.
 | `p` | re-apply every route for the current mode |
 | `x` | remove the routes of the list in use |
 | `r` | refresh, and reload the config from disk |
-| `c` | connect (in the background) |
+| `c` | connect with openconnect (in the background) |
 | `C` | connect in the terminal — for a server that asks for 2FA, a group or a certificate |
-| `R` | reconnect |
-| `D` | disconnect |
+| `R` | reconnect — openconnect, or restart a system VPN |
+| `D` | disconnect whatever owns the tunnel |
 | `F` | forget the saved password |
 | `q` | quit |
 
@@ -232,7 +254,10 @@ Other guardrails:
   routes first, so they cannot be left pointing at a gateway that is about to be wrong.
 - openconnect runs with `--non-inter`: it can never sit waiting at a prompt behind the
   panel. Failures are reported in openconnect's own words.
-- An existing openconnect session started outside the panel is **adopted**, not restarted.
+- An existing openconnect session started outside the panel is **adopted**, not restarted,
+  and so is a system VPN you started from its own app.
+- A tunnel the panel does not recognise is still shown, and the routing still works — it
+  just will not offer to stop something it did not start.
 
 ## Configuration
 
@@ -272,6 +297,8 @@ A `target` is a hostname, an IPv4 address, a subnet (`203.0.113.0/24`), or `serv
   routing on macOS needs a NetworkExtension; openconnect is not one.
 - **IPv4 only.** IPv6 follows whatever the tunnel sets up.
 - **macOS only.** It speaks to BSD `route`/`netstat`/`scutil` and the macOS keychain.
+- **A tunnel is required.** Clients that only expose a local proxy port are out of scope
+  (see above).
 - Only services that publish their IP ranges can be added with `s`.
 
 ## Development
@@ -288,7 +315,7 @@ python3 -m venv venv && ./venv/bin/pip install textual
 | `ocpanel/ui.py` | screens, panels, and the keymap that drives keys, footer, help and palette |
 | `ocpanel/netinfo.py` | reads the routing table, interfaces, live sockets |
 | `ocpanel/rules.py` | a rule, and the `route` calls that install one |
-| `ocpanel/vpn.py` | starting and stopping openconnect |
+| `ocpanel/vpn.py` | starting and stopping openconnect, and system VPNs via `scutil --nc` |
 | `ocpanel/services.py`, `ocpanel/sdr.py` | published IP ranges; Valve's relay directory |
 | `ocpanel/keychain.py` | the saved password |
 | `ocpanel/app.tcss` | the stylesheet — every colour is a theme variable |

@@ -158,3 +158,50 @@ class TestFormatting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProviders(unittest.TestCase):
+    """Recognising who owns the tunnel: openconnect, a system VPN, or nobody."""
+
+    SCUTIL = (
+        'Available network connection services in the current set (*=enabled):\n'
+        '* (Connected)      9BFD2714-233E-420A-A673-55534FB0AC18 VPN '
+        '(hossin.asaadi.V2Box) "V2BOX"                          [VPN:hossin.asaadi.V2Box]\n'
+        '  (Disconnected)   1A2B3C4D-0000-0000-0000-000000000000 VPN '
+        '(com.example.wg) "Work WG"                             [VPN:com.example.wg]\n')
+
+    def parse(self, text):
+        from ocpanel.netinfo import NE_LIST, NEService
+        out = []
+        for line in text.splitlines():
+            m = NE_LIST.match(line)
+            if m:
+                out.append(NEService(name=m["name"], status=m["status"],
+                                     identifier=m["id"], bundle=m["bundle"],
+                                     enabled=m["enabled"] == "*"))
+        return out
+
+    def test_scutil_list_is_parsed(self):
+        services = self.parse(self.SCUTIL)
+        self.assertEqual([s.name for s in services], ["V2BOX", "Work WG"])
+        self.assertEqual([s.connected for s in services], [True, False])
+        self.assertEqual(services[0].bundle, "hossin.asaadi.V2Box")
+
+    def test_header_line_is_not_a_service(self):
+        self.assertEqual(self.parse(self.SCUTIL.splitlines()[0]), [])
+
+    def test_a_system_vpn_can_be_stopped_but_has_no_pid(self):
+        from ocpanel.netinfo import Provider
+        p = Provider(kind="ne-vpn", name="V2BOX", service="V2BOX")
+        self.assertTrue(p.controllable)
+        self.assertIsNone(p.pid)
+        self.assertIn("system VPN", p.label)
+
+    def test_an_unknown_tunnel_is_shown_but_not_controllable(self):
+        from ocpanel.netinfo import Provider
+        self.assertFalse(Provider(kind="unknown", name="utun7", iface="utun7").controllable)
+
+    def test_openconnect_is_controllable_by_pid(self):
+        from ocpanel.netinfo import Provider
+        self.assertTrue(Provider(kind="openconnect", name="openconnect", pid=42).controllable)
+        self.assertFalse(Provider(kind="openconnect", name="openconnect").controllable)

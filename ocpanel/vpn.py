@@ -150,3 +150,52 @@ def pid_from_file() -> int | None:
         return int(Path(PID_FILE).read_text().strip())
     except (OSError, ValueError):
         return None
+
+
+# ------------------------------------------------- system (NetworkExtension) VPNs
+#
+# V2Box and most VLESS / VMess / Trojan / WireGuard clients ship their tunnel as
+# a NetworkExtension and register a VPN configuration. macOS can start and stop
+# those by name, so the panel can drive them without knowing the protocol.
+
+def _scutil(args: list[str], timeout: float = 20.0) -> tuple[int, str]:
+    cmd = ["scutil", "--nc", *args]
+    if os.geteuid() == 0 and os.environ.get("SUDO_USER"):
+        cmd = ["sudo", "-u", os.environ["SUDO_USER"], *cmd]   # configs are per user
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (subprocess.SubprocessError, OSError) as exc:
+        return -1, str(exc)
+    return p.returncode, (p.stdout + p.stderr).strip()
+
+
+def ne_status(name: str) -> str:
+    rc, out = _scutil(["status", name], timeout=10.0)
+    return out.splitlines()[0].strip() if rc == 0 and out else "Unknown"
+
+
+def ne_wait(name: str, want: str, timeout: float = 25.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if ne_status(name).lower() == want.lower():
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def ne_stop(name: str) -> tuple[bool, str]:
+    rc, out = _scutil(["stop", name])
+    if rc != 0:
+        return False, out or f"scutil exited with status {rc}"
+    if not ne_wait(name, "Disconnected"):
+        return False, f"{name} did not report Disconnected"
+    return True, f"{name} disconnected"
+
+
+def ne_start(name: str) -> tuple[bool, str]:
+    rc, out = _scutil(["start", name])
+    if rc != 0:
+        return False, out or f"scutil exited with status {rc}"
+    if not ne_wait(name, "Connected", timeout=40.0):
+        return False, f"{name} did not report Connected - check the app"
+    return True, f"{name} connected"
