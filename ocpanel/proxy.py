@@ -353,8 +353,10 @@ def running_pid() -> int | None:
         return None
     try:
         os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         return None
+    except PermissionError:
+        pass            # running as root while we are not: it exists, it is not ours
     return pid
 
 

@@ -70,11 +70,65 @@ def physical_link() -> Link | None:
     return None
 
 
+# Addresses used only to ask "where would traffic actually go?". Spread across
+# both halves of the space so a bypass rule on one of them cannot mislead us.
+PROBES = ("1.0.0.1", "8.8.4.4", "104.16.132.229", "151.101.1.1")
+_TUNNEL_CACHE: tuple[float, Link | None] = (0.0, None)
+TUNNEL_CACHE_SECONDS = 2.0
+
+
+def iface_addresses() -> dict[str, str]:
+    """interface -> its first IPv4 address."""
+    out, iface, found = _run(["ifconfig"]), "", {}
+    for line in out.splitlines():
+        if line and not line[0].isspace():
+            iface = line.split(":", 1)[0]
+        elif iface and line.strip().startswith("inet "):
+            found.setdefault(iface, line.split()[1])
+    return found
+
+
+def _probed_tunnel() -> Link | None:
+    """Find the tunnel when nobody installed a `default` route.
+
+    sing-box covers the whole address space with a binary tree of routes
+    (1, 2/7, 4/6 ... 128.0/1) rather than replacing the default, so looking for
+    a default route finds nothing. Ask the kernel which source address it would
+    use instead, and see whether that belongs to a tunnel interface.
+    """
+    tunnels = {addr: iface for iface, addr in iface_addresses().items()
+               if is_tunnel(iface)}
+    if not tunnels:
+        return None
+    votes: dict[str, int] = {}
+    for probe in PROBES:
+        iface = tunnels.get(effective_source(probe))
+        if iface:
+            votes[iface] = votes.get(iface, 0) + 1
+    if not votes:
+        return None
+    iface = max(votes, key=votes.get)
+    gateway = ""
+    for probe in PROBES:
+        info = route_info(probe)
+        if info.get("interface") == iface:
+            gateway = info.get("gateway", "")
+            break
+    return Link(gateway or f"link#{iface}", iface)
+
+
 def tunnel_link() -> Link | None:
     for link in default_routes():
         if link.tunnelled:
             return link
-    return None
+    global _TUNNEL_CACHE
+    now = time.monotonic()
+    when, cached = _TUNNEL_CACHE
+    if now - when < TUNNEL_CACHE_SECONDS:
+        return cached                 # apply_rule asks once per rule; don't re-probe
+    link = _probed_tunnel()
+    _TUNNEL_CACHE = (now, link)
+    return link
 
 
 def iface_addr(iface: str) -> str:
@@ -350,13 +404,40 @@ class Provider:
         return self.name
 
 
+def singbox_pid() -> int | None:
+    """Any running `sing-box run`, however it was started."""
+    out = _run(["ps", "-axo", "pid=,command="])
+    for line in out.splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2 and "sing-box" in parts[1] and " run" in parts[1]:
+            try:
+                return int(parts[0])
+            except ValueError:
+                continue
+    return None
+
+
+def process_started(pid: int) -> float:
+    """When a process started, as a unix timestamp (0 when unknown)."""
+    out = _run(["ps", "-p", str(pid), "-o", "lstart="]).strip()
+    try:
+        return time.mktime(time.strptime(out, "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, OverflowError):
+        return 0.0
+
+
 def singbox_provider(tunnel: "Link | None") -> "Provider | None":
     """A sing-box the panel started. Imported lazily to avoid a cycle."""
     from . import proxy
     pid = proxy.running_pid()
     if pid is None:
+        # No pid file, or a stale one. A sing-box carrying the tunnel is still a
+        # sing-box, so look for the process before calling it unknown.
+        pid = singbox_pid()
+    if pid is None:
         return None
     return Provider(kind="sing-box", name="sing-box", pid=pid,
+                    started=process_started(pid),
                     iface=tunnel.iface if tunnel else "")
 
 

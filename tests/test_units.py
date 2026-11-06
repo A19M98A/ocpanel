@@ -472,3 +472,67 @@ class TestSources(unittest.TestCase):
         from ocpanel.keychain import source_account
         self.assertNotEqual(source_account("1"), source_account("2"))
         self.assertIn("1", source_account("1"))
+
+
+class TestTunnelDetection(unittest.TestCase):
+    """Not every client installs a default route."""
+
+    def test_a_default_route_through_a_tunnel_is_found(self):
+        from ocpanel import netinfo
+        saved = netinfo.default_routes
+        netinfo.default_routes = lambda: [netinfo.Link("10.0.0.1", "utun4"),
+                                          netinfo.Link("192.168.1.1", "en0")]
+        try:
+            self.assertEqual(netinfo.tunnel_link().iface, "utun4")
+        finally:
+            netinfo.default_routes = saved
+
+    def test_a_tunnel_without_a_default_route_is_still_found(self):
+        """sing-box covers the space with 1, 2/7, 4/6 ... 128.0/1 instead."""
+        from ocpanel import netinfo
+        saved = (netinfo.default_routes, netinfo.iface_addresses,
+                 netinfo.effective_source, netinfo.route_info, netinfo._TUNNEL_CACHE)
+        netinfo.default_routes = lambda: [netinfo.Link("192.168.1.1", "en0")]
+        netinfo.iface_addresses = lambda: {"en0": "192.168.1.5", "utun5": "172.19.0.1"}
+        netinfo.effective_source = lambda target, port=443: "172.19.0.1"
+        netinfo.route_info = lambda t: {"interface": "utun5", "gateway": "172.19.0.1"}
+        netinfo._TUNNEL_CACHE = (0.0, None)
+        try:
+            link = netinfo.tunnel_link()
+            self.assertEqual((link.iface, link.gateway), ("utun5", "172.19.0.1"))
+        finally:
+            (netinfo.default_routes, netinfo.iface_addresses, netinfo.effective_source,
+             netinfo.route_info, netinfo._TUNNEL_CACHE) = saved
+
+    def test_no_tunnel_when_traffic_uses_the_physical_link(self):
+        from ocpanel import netinfo
+        saved = (netinfo.default_routes, netinfo.iface_addresses,
+                 netinfo.effective_source, netinfo._TUNNEL_CACHE)
+        netinfo.default_routes = lambda: [netinfo.Link("192.168.1.1", "en0")]
+        netinfo.iface_addresses = lambda: {"en0": "192.168.1.5", "utun5": "172.19.0.1"}
+        netinfo.effective_source = lambda target, port=443: "192.168.1.5"
+        netinfo._TUNNEL_CACHE = (0.0, None)
+        try:
+            self.assertIsNone(netinfo.tunnel_link())
+        finally:
+            (netinfo.default_routes, netinfo.iface_addresses,
+             netinfo.effective_source, netinfo._TUNNEL_CACHE) = saved
+
+    def test_a_root_owned_singbox_counts_as_running(self):
+        """os.kill raises PermissionError for another user's process."""
+        import os
+        from ocpanel import proxy
+        saved_kill, saved_file = os.kill, proxy.PID_FILE
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as d:
+            proxy.PID_FILE = pathlib.Path(d) / "pid"
+            proxy.PID_FILE.write_text("4242")
+
+            def denied(pid, sig):
+                raise PermissionError
+
+            os.kill = denied
+            try:
+                self.assertEqual(proxy.running_pid(), 4242)
+            finally:
+                os.kill, proxy.PID_FILE = saved_kill, saved_file
