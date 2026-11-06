@@ -1,16 +1,60 @@
 #!/usr/bin/env bash
 # Install ocpanel into ~/.local/share/ocpanel with its own virtualenv,
-# and drop an `ocpanel` launcher into ~/.local/bin.
+# and drop an `ocpanel` launcher into ~/.local/bin. Works on macOS and Linux.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="$HOME/.local/share/ocpanel"
 BIN="$HOME/.local/bin"
 
-command -v openconnect >/dev/null || {
-  echo "openconnect is not installed. brew install openconnect" >&2; exit 1; }
+# ---------------------------------------------------------------- platform
+case "$(uname -s)" in
+  Darwin) OS=macos ;;
+  Linux)  OS=linux ;;
+  *) echo "ocpanel runs on macOS and Linux; this is $(uname -s)." >&2; exit 1 ;;
+esac
 
-echo "installing to $PREFIX"
+# How to tell the user to install something, in the words of their own system.
+if [ "$OS" = macos ]; then
+  install_hint() { echo "brew install $1"; }
+elif command -v apt-get >/dev/null; then
+  install_hint() { echo "sudo apt install $1"; }
+elif command -v dnf >/dev/null; then
+  install_hint() { echo "sudo dnf install $1"; }
+elif command -v pacman >/dev/null; then
+  install_hint() { echo "sudo pacman -S $1"; }
+elif command -v zypper >/dev/null; then
+  install_hint() { echo "sudo zypper install $1"; }
+else
+  install_hint() { echo "install $1 with your package manager"; }
+fi
+
+# Debian and friends call it libsecret-tools; everyone else, libsecret.
+secret_pkg() { if command -v apt-get >/dev/null; then echo libsecret-tools
+               else echo libsecret; fi; }
+
+need() {               # need <command> <package> [optional]
+  command -v "$1" >/dev/null && return 0
+  if [ "${3:-}" = optional ]; then
+    echo "  note: $1 is not installed - $(install_hint "$2")"
+    return 0
+  fi
+  echo "$1 is not installed. $(install_hint "$2")" >&2
+  exit 1
+}
+
+need openconnect openconnect
+need curl curl
+if [ "$OS" = linux ]; then
+  # The panel edits the routing table with `ip`, and reads DNS from resolvectl
+  # when systemd-resolved is in charge.
+  need ip iproute2
+  need resolvectl systemd-resolved optional
+  need secret-tool "$(secret_pkg)" optional
+fi
+need sing-box sing-box optional        # only for VLESS / VMess / Trojan links
+
+echo "installing to $PREFIX ($OS)"
 mkdir -p "$PREFIX/ocpanel" "$BIN"
 # When install.sh sits inside the install directory itself, the sources are
 # already in place - copying would delete them and then have nothing to copy.
@@ -30,7 +74,8 @@ fi
 rm -rf "$PREFIX/ocpanel/__pycache__" 2>/dev/null || true
 
 if [ ! -x "$PREFIX/venv/bin/python" ]; then
-  python3 -m venv "$PREFIX/venv"
+  python3 -m venv "$PREFIX/venv" || {
+    echo "could not create a virtualenv. $(install_hint python3-venv)" >&2; exit 1; }
 fi
 "$PREFIX/venv/bin/pip" -q install --upgrade pip
 "$PREFIX/venv/bin/pip" -q install "textual>=1.0"
@@ -70,6 +115,8 @@ echo "    sudo ~/.local/bin/ocpanel   # full control (needs root to change route
 echo "    ocpanel                     # read-only view"
 case ":$PATH:" in
   *":$BIN:"*) ;;
-  *) echo; echo "note: $BIN is not on your PATH. Add to ~/.zshrc:"
+  *) if [ "$OS" = macos ] || [ -n "${ZSH_VERSION:-}" ]; then RC="$HOME/.zshrc"
+     else RC="$HOME/.bashrc"; fi
+     echo; echo "note: $BIN is not on your PATH. Add to $RC:"
      echo "    export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 esac

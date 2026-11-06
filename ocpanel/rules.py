@@ -6,7 +6,7 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 
-from . import netinfo
+from . import netinfo, plat
 
 SERVICE_PREFIX = "service:"
 
@@ -73,19 +73,13 @@ def is_root() -> bool:
     return os.geteuid() == 0
 
 
-def _route(args: list[str]) -> tuple[bool, str]:
+def _run(cmd: list[str]) -> tuple[bool, str]:
     try:
-        p = subprocess.run(["route", "-n", *args], capture_output=True, text=True, timeout=10)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     except (subprocess.SubprocessError, OSError) as exc:
         return False, str(exc)
     out = (p.stdout + p.stderr).strip()
     return p.returncode == 0, out
-
-
-def _spec(net: ipaddress.IPv4Network) -> list[str]:
-    if net.prefixlen == 32:
-        return ["-host", str(net.network_address)]
-    return ["-net", str(net.network_address), "-netmask", str(net.netmask)]
 
 
 def add_route(net: ipaddress.IPv4Network, gateway: str) -> tuple[bool, str]:
@@ -93,27 +87,27 @@ def add_route(net: ipaddress.IPv4Network, gateway: str) -> tuple[bool, str]:
 
     More specific than the VPN's default route, so the kernel prefers it.
     """
-    ok, out = _route(["add", *_spec(net), gateway])
-    if not ok and "File exists" in out:
-        return _route(["change", *_spec(net), gateway])
+    ok, out = _run(plat.add_route_command(net, gateway))
+    if not ok and plat.route_exists(out):
+        return _run(plat.change_route_command(net, gateway))
     return ok, out
 
 
 def add_tunnel_route(net: ipaddress.IPv4Network, iface: str) -> tuple[bool, str]:
     """Send one network into the VPN tunnel, whatever the default route says."""
-    ok, out = _route(["add", *_spec(net), "-interface", iface])
-    if not ok and "File exists" in out:
-        return _route(["change", *_spec(net), "-interface", iface])
+    ok, out = _run(plat.add_tunnel_route_command(net, iface))
+    if not ok and plat.route_exists(out):
+        return _run(plat.change_tunnel_route_command(net, iface))
     return ok, out
 
 
 def delete_route(net: ipaddress.IPv4Network) -> tuple[bool, str]:
-    return _route(["delete", *_spec(net)])
+    return _run(plat.delete_route_command(net))
 
 
 def was_absent(out: str) -> bool:
     """A delete that failed only because the route was never there."""
-    return "not in table" in out
+    return plat.route_absent(out)
 
 
 def verify(net: ipaddress.IPv4Network) -> str:

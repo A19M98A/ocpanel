@@ -5,18 +5,19 @@ build-backend = "hatchling.build"
 [project]
 name = "ocpanel"
 version = "1.0.0"
-description = "A terminal panel for OpenConnect on macOS: split tunnelling you can see and change while the VPN is running"
+description = "A terminal panel for OpenConnect on macOS and Linux: split tunnelling you can see and change while the VPN is running"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 authors = [{ name = "Amin", email = "amin@users.noreply.github.com" }]
-keywords = ["openconnect", "vpn", "split-tunnel", "macos", "tui", "textual", "routing"]
+keywords = ["openconnect", "vpn", "split-tunnel", "macos", "linux", "tui", "textual", "routing"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console :: Curses",
     "Intended Audience :: System Administrators",
     "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Topic :: System :: Networking",
 ]

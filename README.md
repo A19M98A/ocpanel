@@ -1,17 +1,19 @@
 # ocpanel
 
-**Split tunnelling on macOS — for OpenConnect and for system VPNs like V2Box — from the
-client side, while the tunnel is running.**
+**Split tunnelling on macOS and Linux — for OpenConnect and for system VPNs like V2Box —
+from the client side, while the tunnel is running.**
 
 [![macOS](https://img.shields.io/badge/macOS-11%2B-black?logo=apple&logoColor=white)](#requirements)
+[![Linux](https://img.shields.io/badge/Linux-iproute2-FCC624?logo=linux&logoColor=black)](#requirements)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](#requirements)
 [![Built with Textual](https://img.shields.io/badge/built%20with-Textual-5A2CA0)](https://textual.textualize.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A terminal panel for [OpenConnect](https://www.infradead.org/openconnect/) and for any VPN
+A terminal panel for [OpenConnect](https://www.infradead.org/openconnect/), for any VPN
 that macOS runs as a system tunnel — V2Box, and other VLESS / VMess / Trojan / WireGuard
-clients shipped as a NetworkExtension. Decide what goes through the tunnel and what goes
-around it, watch it take effect, and connect or disconnect without leaving the panel.
+clients shipped as a NetworkExtension — and for a VLESS/VMess/Trojan subscription the panel
+runs itself. Decide what goes through the tunnel and what goes around it, watch it take
+effect, and connect or disconnect without leaving the panel.
 
 ocpanel works on the **routing table**, not on the protocol, so it does not care who built
 the tunnel. Your VPN server does not need to cooperate and does not need to know.
@@ -54,12 +56,32 @@ worked.
 
 | | |
 |---|---|
-| OS | macOS (11 or newer; uses BSD `route`, `netstat`, `scutil`, `security`) |
-| VPN client | [`openconnect`](https://formulae.brew.sh/formula/openconnect), any client macOS registers as a system VPN (V2Box, WireGuard…), or [`sing-box`](https://sing-box.sagernet.org/) to run a VLESS/VMess/Trojan subscription from the panel itself |
+| OS | **macOS** 11+ (BSD `route`, `netstat`, `scutil`, `security`) or **Linux** (`iproute2`; `resolvectl` and `secret-tool` if you have them) |
+| VPN client | [`openconnect`](https://www.infradead.org/openconnect/), any client macOS registers as a system VPN (V2Box, WireGuard…), or [`sing-box`](https://sing-box.sagernet.org/) to run a VLESS/VMess/Trojan subscription from the panel itself |
 | Python | 3.10+ |
 | Privileges | `sudo` to change routes. Without it the panel runs read-only. |
 
 IPv4 only. See [Limitations](#limitations).
+
+<details>
+<summary>What differs between the two systems</summary>
+
+Nothing you have to think about — one install, one config, the same keys. The panel asks
+the system in that system's own language and says so in its own words.
+
+| | macOS | Linux |
+|---|---|---|
+| Routing table | `route`, `netstat -rn` | `ip route` |
+| Interface counters | `netstat -I` | `/sys/class/net/*/statistics` |
+| Resolvers | `scutil --dns` | `resolvectl`, or `/etc/resolv.conf` |
+| Live sockets | `lsof` | `lsof` if present, else `ss` |
+| Saved password | login keychain | desktop keyring via `secret-tool`, else a `0600` file |
+| System VPN by name | `scutil --nc` | not a thing — start your client yourself |
+| Tunnel interfaces | `utun*`, `ppp*`, `ipsec*` | `tun*`, `tap*`, `wg*`, `nordlynx`… |
+
+Where a keyring is missing, the panel says plainly that the password went into a private
+but unencrypted file, so the choice stays yours.
+</details>
 
 ## Install
 
@@ -103,11 +125,14 @@ keychain are still read as *you*, not as root.
 | Owner of the tunnel | Shown as | `c` connect | `R` reconnect | `D` disconnect |
 |---|---|---|---|---|
 | `openconnect` | `openconnect` + pid | yes | yes | yes |
-| System VPN (NetworkExtension) — V2Box, WireGuard… | e.g. `V2BOX (system VPN)` | start it in its own app | yes, via `scutil --nc` | yes |
-| Anything else holding a `utun` default route | the interface name | no | no | no — but the routing still works |
+| A subscription the panel runs via `sing-box` | the server name | yes | yes | yes |
+| System VPN (NetworkExtension) — V2Box, WireGuard… *(macOS only)* | e.g. `V2BOX (system VPN)` | start it in its own app | yes, via `scutil --nc` | yes |
+| Anything else holding a tunnel default route | the interface name | no | no | no — but the routing still works |
 
 For a system VPN the panel never needs your credentials: macOS starts and stops the
-configuration by name, and the client handles its own protocol.
+configuration by name, and the client handles its own protocol. Linux has no equivalent
+registry of VPN configurations, so there the panel adopts whatever tunnel it finds and
+drives `openconnect` and `sing-box` itself.
 
 > **A proxy is not a tunnel.** If your client runs as a local SOCKS/HTTP proxy
 > (`127.0.0.1:1080`) instead of a TUN interface, the routing table is not involved and
@@ -130,10 +155,10 @@ list that is *not* in use at any time — changes are saved and take effect when
 
 ## How it works
 
-**VPN by default.** OpenConnect installs a default route through `utun*`. For each target
-on your bypass list, ocpanel adds a **more specific** route via your real gateway. A more
-specific route always wins, so that traffic leaves over your normal connection and
-everything else stays in the tunnel.
+**VPN by default.** OpenConnect installs a default route through the tunnel (`utun*` on
+macOS, `tun*` on Linux). For each target on your bypass list, ocpanel adds a **more
+specific** route via your real gateway. A more specific route always wins, so that traffic
+leaves over your normal connection and everything else stays in the tunnel.
 
 **Direct by default.** ocpanel adds `0.0.0.0/1` and `128.0.0.0/1` via your real gateway.
 Together they cover every address and beat the VPN's `default` route without touching it —
@@ -144,6 +169,30 @@ tunnel interface, so they still go through it.
 public resolver such as `1.1.1.1`, as opposed to your own LAN router) are pinned to the
 tunnel. Lookups keep being answered by the VPN's resolvers, so a hostname on your VPN list
 cannot be resolved to something else by your ISP.
+
+<details>
+<summary>Linux: how this survives sing-box's policy routing</summary>
+
+`sing-box`'s `auto_route` on Linux does not install a plain default route; it adds `ip rule`
+entries that send traffic to its own table. That sounds like it would defeat route-based
+rules, and it does not, because of the order it chooses:
+
+```
+9001: from all lookup 2022 suppress_prefixlength 0   # tunnel table, default suppressed
+9002: not from all dport 53 lookup main suppress_prefixlength 0   # your routes, default suppressed
+9003: not from all iif lo lookup 2022                # everything left over -> tunnel
+```
+
+Rule 9002 consults the **main** table — where ocpanel writes — and suppresses only the
+`default` route there. So every rule ocpanel installs still wins, and only traffic nothing
+matches falls through to the tunnel. The half-default routes of direct mode are `/1`, not
+`/0`, so they are not suppressed either and direct mode works the same way.
+
+One consequence: port-53 traffic skips rule 9002 and always goes to the tunnel, so a bypass
+rule cannot send DNS out the direct link while sing-box is running. The panel hijacks DNS
+into the tunnel's resolvers anyway, which is what you want — it is why a poisoned ISP
+resolver cannot reach you.
+</details>
 
 ## Running a VLESS / VMess / Trojan subscription
 
@@ -302,22 +351,29 @@ remembered).
 
 ## The password
 
-Tick **Remember it in my macOS login keychain** in the connect dialog. After a successful
-connection the password is stored with `security` under the service `ocpanel-vpn`, and `c`
+Tick **Remember it** in the connect dialog — the box names whichever store your system has.
+After a successful connection the password is kept under the service `ocpanel-vpn` and `c`
 connects straight away from then on.
+
+| Where | Used on |
+|---|---|
+| login keychain, via `security` | macOS |
+| desktop keyring, via `secret-tool` (libsecret) | Linux with a keyring |
+| `~/.config/ocpanel/secrets.json`, mode `0600` | Linux with no keyring — **not encrypted**, and the panel tells you so |
 
 - It is **not** written to `config.json` — that file is plain text. The config only records
   `"save_password": true` so the panel knows to look.
 - It is **not** passed on the command line, where `ps` would show it. openconnect reads it
   from stdin.
 - It is **not** written to the activity log.
-- The panel runs under `sudo`, so every keychain command is run back as you, not as root.
+- The panel runs under `sudo`, so every keyring command is run back as you, not as root —
+  on Linux that includes pointing it at your own D-Bus session, which root cannot see.
 
 `F` forgets it again. Prefer your own secret store? Set `auth_command` (below).
 
 ## Safety and recovery
 
-Routes point at a specific gateway, and **macOS does not remove or repoint them when you
+Routes point at a specific gateway, and **neither system removes or repoints them when you
 change network**. ocpanel re-points them automatically while it is open. If you switch
 Wi-Fi with the panel closed while direct mode is on, every connection breaks — so there is
 an escape hatch that needs no UI:
@@ -376,9 +432,12 @@ A `target` is a hostname, an IPv4 address, a subnet (`203.0.113.0/24`), or `serv
 
 - **Routing is per destination, not per application.** The kernel does not know which app
   sent a packet, so two apps talking to the same address share its route. True per-app VPN
-  routing on macOS needs a NetworkExtension; openconnect is not one.
+  routing needs a NetworkExtension on macOS or cgroup/`fwmark` rules on Linux; neither is
+  what openconnect does.
 - **IPv4 only.** IPv6 follows whatever the tunnel sets up.
-- **macOS only.** It speaks to BSD `route`/`netstat`/`scutil` and the macOS keychain.
+- **macOS and Linux.** Other systems are not supported; the panel says so and stops.
+- **System VPNs by name are macOS-only.** On Linux there is nothing to ask, so start such a
+  client yourself; the panel will adopt its tunnel and route around it.
 - **A tunnel is required.** Clients that only expose a local proxy port are out of scope
   (see above).
 - Only services that publish their IP ranges can be added with `s`.
@@ -397,6 +456,7 @@ python3 -m venv venv && ./venv/bin/pip install textual
 |---|---|
 | `ocpanel/app.py` | state, routing decisions, actions |
 | `ocpanel/ui.py` | screens, panels, and the keymap that drives keys, footer, help and palette |
+| `ocpanel/plat.py` | the one place the two systems differ: which command to run, and how to read its output |
 | `ocpanel/netinfo.py` | reads the routing table, interfaces, live sockets |
 | `ocpanel/rules.py` | a rule, and the `route` calls that install one |
 | `ocpanel/vpn.py` | starting and stopping openconnect, and system VPNs via `scutil --nc` |
@@ -410,6 +470,18 @@ footer entry, the help screen and the command palette all follow from it.
 
 Anything that touches the routing table lives behind `rules.py`, so it can be stubbed —
 the panel is exercised against a simulated routing table rather than a real one.
+
+Everything platform-specific is a function in `plat.py` that *takes text* rather than
+running anything, so both systems' output is parsed under test from either one — the Linux
+tests pass on a Mac and the macOS tests pass on Linux. Real route changes are verified in a
+throwaway container, which has a routing table of its own:
+
+```bash
+docker run --rm --cap-add=NET_ADMIN -v "$PWD":/src:ro ubuntu:24.04 \
+  bash -c 'apt-get -qq update && apt-get -qq install -y python3-venv iproute2 curl openconnect \
+           && cp -r /src /s && cd /s && rm -rf venv && ./install.sh \
+           && ~/.local/share/ocpanel/venv/bin/python -m unittest discover -s tests'
+```
 
 ## License
 

@@ -9,7 +9,9 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 
-TUNNEL_PREFIXES = ("utun", "ppp", "ipsec", "tun")
+from . import plat
+
+TUNNEL_PREFIXES = plat.TUNNEL_PREFIXES
 
 
 def _run_as_user(cmd: list[str], timeout: float = 10.0) -> str:
@@ -35,7 +37,7 @@ def _run(cmd: list[str], timeout: float = 5.0) -> str:
 
 
 def is_tunnel(iface: str) -> bool:
-    return iface.startswith(TUNNEL_PREFIXES)
+    return plat.is_tunnel(iface)
 
 
 @dataclass
@@ -50,16 +52,9 @@ class Link:
 
 
 def default_routes() -> list[Link]:
-    out = _run(["netstat", "-rn", "-f", "inet"])
-    links: list[Link] = []
-    for line in out.splitlines():
-        f = line.split()
-        if len(f) >= 4 and f[0] == "default":
-            gw, iface = f[1], f[-1]
-            if iface.isdigit() or "." in iface:      # Expire column present
-                iface = f[-2]
-            links.append(Link(gw, iface))
-    return links
+    out = _run(plat.routes_command())
+    return [Link(gateway, iface) for dest, gateway, iface in plat.parse_routes(out)
+            if dest in ("default", "0.0.0.0/0")]
 
 
 def physical_link() -> Link | None:
@@ -79,13 +74,7 @@ TUNNEL_CACHE_SECONDS = 2.0
 
 def iface_addresses() -> dict[str, str]:
     """interface -> its first IPv4 address."""
-    out, iface, found = _run(["ifconfig"]), "", {}
-    for line in out.splitlines():
-        if line and not line[0].isspace():
-            iface = line.split(":", 1)[0]
-        elif iface and line.strip().startswith("inet "):
-            found.setdefault(iface, line.split()[1])
-    return found
+    return plat.parse_addresses(_run(plat.addresses_command()))
 
 
 def _probed_tunnel() -> Link | None:
@@ -132,34 +121,25 @@ def tunnel_link() -> Link | None:
 
 
 def iface_addr(iface: str) -> str:
-    out = _run(["ifconfig", iface])
-    m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", out)
-    return m.group(1) if m else ""
+    return iface_addresses().get(iface, "")
 
 
 def route_iface(target: str) -> str:
     """Which interface the kernel would actually use for `target` right now."""
-    out = _run(["route", "-n", "get", target])
-    m = re.search(r"^\s*interface:\s*(\S+)", out, re.M)
-    return m.group(1) if m else ""
+    return route_info(target).get("interface", "")
 
 
 def iface_bytes(iface: str) -> tuple[int, int]:
-    """(rx, tx) byte counters for an interface.
-
-    Point-to-point links (utun) have no hardware address, so the Address column
-    is missing and the fixed column numbers shift. The trailing columns are
-    stable on both, so index from the end of the <Link#..> row.
-    """
-    out = _run(["netstat", "-I", iface, "-b", "-n"])
-    for line in out.splitlines()[1:]:
-        f = line.split()
-        if len(f) >= 6 and f[0] == iface and f[2].startswith("<Link"):
-            try:
-                return int(f[-5]), int(f[-2])
-            except (ValueError, IndexError):
-                continue
-    return 0, 0
+    """(rx, tx) byte counters for an interface."""
+    if plat.LINUX:
+        # sysfs is cheaper and steadier than parsing a tool's output.
+        try:
+            base = f"/sys/class/net/{iface}/statistics"
+            with open(f"{base}/rx_bytes") as rx, open(f"{base}/tx_bytes") as tx:
+                return int(rx.read().strip()), int(tx.read().strip())
+        except (OSError, ValueError):
+            return 0, 0
+    return plat.parse_counters(_run(plat.counters_command(iface)), iface)
 
 
 @dataclass
@@ -212,8 +192,14 @@ def resolve(host: str) -> list[str]:
 
 
 def dns_servers() -> list[str]:
-    out = _run(["scutil", "--dns"])
-    return sorted({m for m in re.findall(r"nameserver\[\d+\] : (\S+)", out)})
+    servers = plat.parse_dns(_run(plat.dns_command()))
+    if not servers and plat.LINUX:
+        try:
+            with open("/etc/resolv.conf") as handle:
+                servers = plat.parse_resolv_conf(handle.read())
+        except OSError:
+            servers = []
+    return servers
 
 
 GAME_PROCESS_HINTS = ("dota", "steam", "csgo", "cs2", "hl2", "srcds", "paladins",
@@ -246,23 +232,17 @@ def live_peers(hints: tuple[str, ...] = GAME_PROCESS_HINTS) -> list[Peer]:
     Run as root this sees every user's sockets; unprivileged it sees only yours,
     which is still enough when the game runs as you.
     """
-    out = _run(["lsof", "-i", "-n", "-P"], timeout=15.0)
+    tool = plat.sockets_tool()
+    out = _run(plat.sockets_command(tool), timeout=15.0)
     peers: dict[tuple[str, int], Peer] = {}
-    for line in out.splitlines()[1:]:
-        f = line.split()
-        if len(f) < 9:
-            continue
-        command, pid_s, proto, name = f[0], f[1], f[7], f[8]
+    for command, pid, proto, local, remote in plat.parse_sockets(out, tool):
         if not any(h in command.lower() for h in hints):
             continue
-        if proto not in ("TCP", "UDP") or "->" not in name:
-            continue
-        local, _, remote = name.partition("->")
         host, _, port_s = remote.rpartition(":")
         if not _routable(host):
             continue
         try:
-            pid, port = int(pid_s), int(port_s)
+            port = int(port_s)
         except ValueError:
             continue
         peers.setdefault((host, port), Peer(command, pid, proto, local, host, port))
@@ -271,13 +251,7 @@ def live_peers(hints: tuple[str, ...] = GAME_PROCESS_HINTS) -> list[Peer]:
 
 def route_info(target: str) -> dict[str, str]:
     """The kernel's routing decision for one address, as key/value pairs."""
-    out = _run(["route", "-n", "get", target])
-    info: dict[str, str] = {}
-    for line in out.splitlines():
-        key, sep, value = line.partition(":")
-        if sep and key.strip() in ("destination", "mask", "gateway", "interface"):
-            info[key.strip()] = value.strip()
-    return info
+    return plat.parse_route_get(_run(plat.route_get_command(target)))
 
 
 def reached_via_router(target: str) -> bool:
@@ -291,17 +265,8 @@ def reached_via_router(target: str) -> bool:
 
 
 def _expand_dest(dest: str) -> ipaddress.IPv4Network | None:
-    """netstat abbreviates destinations: '128.0/1' means 128.0.0.0/1."""
-    if dest == "default":
-        return ipaddress.ip_network("0.0.0.0/0")
-    addr, sep, plen = dest.partition("/")
-    parts = addr.split(".")
-    if not sep or not 1 <= len(parts) <= 4:
-        return None
-    try:
-        return ipaddress.ip_network(f"{'.'.join(parts + ['0'] * (4 - len(parts)))}/{plen}")
-    except ValueError:
-        return None
+    """netstat and `ip route` write destinations differently; plat knows which."""
+    return plat.expand_dest(dest)
 
 
 HALF_DEFAULTS = ("0.0.0.0/1", "128.0.0.0/1")
@@ -313,19 +278,12 @@ def half_default_routes() -> dict[str, Link]:
     They are more specific than any 'default' route, so whoever owns them owns
     all traffic that has no more specific route of its own.
     """
-    out = _run(["netstat", "-rn", "-f", "inet"])
+    out = _run(plat.routes_command())
     found: dict[str, Link] = {}
-    for line in out.splitlines():
-        f = line.split()
-        if len(f) < 4:
-            continue
-        net = _expand_dest(f[0])
-        if net is None or str(net) not in HALF_DEFAULTS:
-            continue
-        iface = f[-1]
-        if iface.isdigit() or "." in iface:
-            iface = f[-2]
-        found[str(net)] = Link(f[1], iface)
+    for dest, gateway, iface in plat.parse_routes(out):
+        net = plat.expand_dest(dest)
+        if net is not None and str(net) in HALF_DEFAULTS:
+            found[str(net)] = Link(gateway, iface)
     return found
 
 
@@ -359,6 +317,8 @@ class NEService:
 
 
 def ne_vpn_services() -> list[NEService]:
+    if not plat.MACOS:
+        return []                     # NetworkExtension VPNs are a macOS thing
     out = _run_as_user(["scutil", "--nc", "list"])
     found = []
     for line in out.splitlines():

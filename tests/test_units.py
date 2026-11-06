@@ -3,34 +3,46 @@
 Everything that changes the routing table is deliberately not exercised here;
 that is done against a simulated routing table, never a real one.
 """
+import ipaddress
 import os
+import pathlib
 import tempfile
 import unittest
 
 # config reads this at import time, so keep the tests away from a real config.
 os.environ.setdefault("OCPANEL_HOME", tempfile.mkdtemp(prefix="ocpanel-test-"))
 
-from ocpanel import netinfo, vpn                      # noqa: E402
+from ocpanel import netinfo, plat, vpn                # noqa: E402
 from ocpanel.app import human_bytes, human_secs       # noqa: E402
 from ocpanel.config import Config, MODE_DIRECT, Profile  # noqa: E402
-from ocpanel.rules import Rule, _spec                 # noqa: E402
+from ocpanel.rules import Rule                        # noqa: E402
 from ocpanel.ui import KEYMAP, bindings, pretty_keys  # noqa: E402
 
 
 class TestRouteParsing(unittest.TestCase):
-    def test_netstat_destinations_are_expanded(self):
+    def test_destinations_are_expanded(self):
+        native = ({"0/1": "0.0.0.0/1", "128.0/1": "128.0.0.0/1",
+                   "198.51.100/24": "198.51.100.0/24", "default": "0.0.0.0/0"}
+                  if plat.MACOS else
+                  {"0.0.0.0/1": "0.0.0.0/1", "128.0.0.0/1": "128.0.0.0/1",
+                   "198.51.100.0/24": "198.51.100.0/24", "default": "0.0.0.0/0"})
+        for text, expected in native.items():
+            self.assertEqual(str(netinfo._expand_dest(text)), expected, text)
+
+    def test_netstat_abbreviations_are_expanded(self):
         cases = {"0/1": "0.0.0.0/1", "128.0/1": "128.0.0.0/1",
                  "198.51.100/24": "198.51.100.0/24", "default": "0.0.0.0/0"}
         for text, expected in cases.items():
-            self.assertEqual(str(netinfo._expand_dest(text)), expected, text)
+            self.assertEqual(str(plat.expand_dest(text, macos=True)), expected, text)
 
     def test_junk_destination_is_ignored(self):
         self.assertIsNone(netinfo._expand_dest("bogus"))
 
     def test_tunnel_interfaces_are_recognised(self):
-        for iface in ("utun0", "utun4", "ppp0", "ipsec1"):
+        for iface in ("utun0", "utun4", "ppp0", "ipsec1",    # macOS
+                      "tun0", "tap1", "wg0", "nordlynx"):    # Linux
             self.assertTrue(netinfo.is_tunnel(iface), iface)
-        for iface in ("en0", "en1", "bridge0", ""):
+        for iface in ("en0", "en1", "bridge0", "eth0", "enp3s0", "wlan0", ""):
             self.assertFalse(netinfo.is_tunnel(iface), iface)
 
 
@@ -41,12 +53,6 @@ class TestRules(unittest.TestCase):
         for target, kind in cases.items():
             self.assertEqual(Rule(target=target).kind, kind, target)
 
-    def test_route_arguments(self):
-        import ipaddress
-        self.assertEqual(_spec(ipaddress.ip_network("203.0.113.4/32")),
-                         ["-host", "203.0.113.4"])
-        self.assertEqual(_spec(ipaddress.ip_network("203.0.113.0/24")),
-                         ["-net", "203.0.113.0", "-netmask", "255.255.255.0"])
 
     def test_bad_subnet_reports_an_error_instead_of_raising(self):
         rule = Rule(target="203.0.113.0/99")
@@ -574,3 +580,197 @@ class TestDnsHandling(unittest.TestCase):
         rule = next(r for r in dns["rules"] if "domain" in r)
         self.assertEqual(rule["domain"], ["vpn.example.com"])
         self.assertEqual(rule["server"], "local")
+
+
+NETSTAT = """Routing tables
+
+Internet:
+Destination        Gateway            Flags        Netif Expire
+default            172.30.36.1        UGScg          en1
+0/1                172.19.0.1         UGSc         utun5
+10.10.34.36        172.19.0.1         UGHS         utun5
+128.0/1            172.19.0.1         UGSc         utun5
+198.51.100/24      172.30.36.1        UGSc           en1
+"""
+
+IP_ROUTE = """default via 192.168.1.1 dev eth0 proto dhcp metric 100
+0.0.0.0/1 dev tun0 scope link
+10.10.34.36 via 192.168.1.1 dev eth0
+128.0.0.0/1 dev tun0 scope link
+198.51.100.0/24 via 192.168.1.1 dev eth0
+"""
+
+
+class TestPlatformRoutes(unittest.TestCase):
+    """Both platforms' output, parsed from whichever one is running the tests."""
+
+    def test_netstat_rows(self):
+        rows = plat.parse_routes(NETSTAT, macos=True)
+        self.assertIn(("default", "172.30.36.1", "en1"), rows)
+        self.assertIn(("128.0/1", "172.19.0.1", "utun5"), rows)
+        self.assertNotIn("Destination", [r[0] for r in rows])
+
+    def test_ip_route_rows(self):
+        rows = plat.parse_routes(IP_ROUTE, macos=False)
+        self.assertIn(("default", "192.168.1.1", "eth0"), rows)
+        self.assertIn(("128.0.0.0/1", "", "tun0"), rows)       # dev-only, no gateway
+
+    def test_both_find_the_same_halves(self):
+        for text, macos in ((NETSTAT, True), (IP_ROUTE, False)):
+            halves = {str(plat.expand_dest(d, macos=macos))
+                      for d, _, i in plat.parse_routes(text, macos=macos)
+                      if plat.is_tunnel(i)}
+            self.assertEqual({"0.0.0.0/1", "128.0.0.0/1"} & halves,
+                             {"0.0.0.0/1", "128.0.0.0/1"}, macos)
+
+    def test_linux_destinations_are_already_expanded(self):
+        self.assertEqual(str(plat.expand_dest("128.0.0.0/1", macos=False)), "128.0.0.0/1")
+        self.assertEqual(str(plat.expand_dest("default", macos=False)), "0.0.0.0/0")
+        self.assertIsNone(plat.expand_dest("bogus", macos=False))
+
+    def test_route_get_both_ways(self):
+        bsd = plat.parse_route_get("""   route to: 1.1.1.1
+destination: 1.0.0.0
+       mask: 255.0.0.0
+    gateway: 172.19.0.1
+  interface: utun5
+""", macos=True)
+        self.assertEqual(bsd["interface"], "utun5")
+        self.assertEqual(bsd["gateway"], "172.19.0.1")
+        linux = plat.parse_route_get(
+            "1.1.1.1 via 192.168.1.1 dev eth0 src 192.168.1.5 uid 1000", macos=False)
+        self.assertEqual(linux["interface"], "eth0")
+        self.assertEqual(linux["gateway"], "192.168.1.1")
+        self.assertEqual(linux["source"], "192.168.1.5")
+
+    def test_addresses_both_ways(self):
+        bsd = plat.parse_addresses("""lo0: flags=8049<UP> mtu 16384
+\tinet 127.0.0.1 netmask 0xff000000
+en1: flags=8863<UP> mtu 1500
+\tinet 172.30.36.17 netmask 0xfffffc00 broadcast 172.30.39.255
+utun5: flags=8051<UP> mtu 1399
+\tinet 172.19.0.1 --> 172.19.0.1 netmask 0xffffffff
+""", macos=True)
+        self.assertEqual(bsd, {"lo0": "127.0.0.1", "en1": "172.30.36.17",
+                               "utun5": "172.19.0.1"})
+        linux = plat.parse_addresses(
+            "1: lo    inet 127.0.0.1/8 scope host lo\n"
+            "2: eth0    inet 192.168.1.5/24 brd 192.168.1.255 scope global eth0\n"
+            "3: tun0    inet 10.8.0.2/24 scope global tun0\n", macos=False)
+        self.assertEqual(linux, {"lo": "127.0.0.1", "eth0": "192.168.1.5",
+                                 "tun0": "10.8.0.2"})
+
+    def test_dns_both_ways(self):
+        self.assertEqual(plat.parse_dns(
+            "resolver #1\n  nameserver[0] : 192.168.20.14\n"
+            "  nameserver[1] : 192.168.20.15\n", macos=True),
+            ["192.168.20.14", "192.168.20.15"])
+        self.assertEqual(plat.parse_dns("""Global
+       Protocols: -LLMNR
+  resolv.conf mode: stub
+
+Link 2 (eth0)
+    DNS Servers: 192.168.1.1 1.1.1.1
+         DNS Domain: lan
+""", macos=False), ["1.1.1.1", "192.168.1.1"])
+        self.assertEqual(plat.parse_resolv_conf(
+            "# comment\nnameserver 1.1.1.1\nnameserver 8.8.8.8\nsearch lan\n"),
+            ["1.1.1.1", "8.8.8.8"])
+
+    def test_route_commands_per_platform(self):
+        host = ipaddress.ip_network("203.0.113.4/32")
+        net = ipaddress.ip_network("203.0.113.0/24")
+        self.assertEqual(plat.add_route_command(host, "192.0.2.1", macos=True),
+                         ["route", "-n", "add", "-host", "203.0.113.4", "192.0.2.1"])
+        self.assertEqual(plat.add_route_command(net, "192.0.2.1", macos=True),
+                         ["route", "-n", "add", "-net", "203.0.113.0",
+                          "-netmask", "255.255.255.0", "192.0.2.1"])
+        self.assertEqual(plat.add_route_command(net, "192.0.2.1", macos=False),
+                         ["ip", "route", "replace", "203.0.113.0/24", "via", "192.0.2.1"])
+        self.assertEqual(plat.add_tunnel_route_command(net, "tun0", macos=False),
+                         ["ip", "route", "replace", "203.0.113.0/24", "dev", "tun0"])
+        self.assertEqual(plat.delete_route_command(net, macos=False),
+                         ["ip", "route", "del", "203.0.113.0/24"])
+        # `ip route replace` adds or changes, so Linux needs no separate change.
+        self.assertEqual(plat.change_route_command(net, "192.0.2.1", macos=False),
+                         plat.add_route_command(net, "192.0.2.1", macos=False))
+        self.assertNotEqual(plat.change_route_command(net, "192.0.2.1", macos=True),
+                            plat.add_route_command(net, "192.0.2.1", macos=True))
+
+    def test_route_outcomes_are_recognised_on_both(self):
+        for text in ("add net 203.0.113.0: gateway 192.0.2.1: File exists",
+                     "RTNETLINK answers: File exists"):
+            self.assertTrue(plat.route_exists(text), text)
+        for text in ("delete net 203.0.113.0: not in table",
+                     "RTNETLINK answers: No such process"):
+            self.assertTrue(plat.route_absent(text), text)
+        self.assertFalse(plat.route_exists("ok"))
+        self.assertFalse(plat.route_absent("ok"))
+
+
+class TestPlatformSockets(unittest.TestCase):
+    LSOF = ("COMMAND  PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\n"
+            "dota2   5123 amin   50u  IPv4 0x1234     0t0  UDP "
+            "172.30.36.17:52000->155.133.250.1:27017\n"
+            "sshd     900 root    3u  IPv4 0x1236     0t0  TCP *:22 (LISTEN)\n")
+    SS = ("Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n"
+          "udp   ESTAB 0      0      172.30.36.17:52000 155.133.250.1:27017 "
+          'users:(("dota2",pid=5123,fd=50))\n'
+          "tcp   LISTEN 0     128    0.0.0.0:22         0.0.0.0:* "
+          'users:(("sshd",pid=900,fd=3))\n')
+
+    def test_both_tools_give_the_same_peer(self):
+        want = ("dota2", 5123, "UDP", "172.30.36.17:52000", "155.133.250.1:27017")
+        self.assertIn(want, plat.parse_sockets(self.LSOF, "lsof"))
+        self.assertIn(want, plat.parse_sockets(self.SS, "ss"))
+
+    def test_listeners_are_not_peers(self):
+        # lsof drops them for want of "->"; ss keeps 0.0.0.0:*, which is not routable.
+        self.assertEqual([r[0] for r in plat.parse_sockets(self.LSOF, "lsof")], ["dota2"])
+        self.assertFalse(netinfo._routable("0.0.0.0"))
+
+    def test_ss_rows_without_a_process_are_skipped(self):
+        self.assertEqual(plat.parse_sockets(
+            "tcp ESTAB 0 0 10.0.0.1:1 10.0.0.2:443\n", "ss"), [])
+
+
+class TestSecretStore(unittest.TestCase):
+    def test_file_store_round_trip(self):
+        import tempfile as tf
+        from unittest import mock
+        from ocpanel import keychain as kc
+        path = pathlib.Path(tf.mkdtemp()) / "secrets.json"
+        with mock.patch.object(plat, "secret_store", lambda: "file"), \
+             mock.patch.object(kc, "_secrets_path", lambda: path):
+            self.assertTrue(kc.save("a@b", "hunter2")[0])
+            self.assertEqual(kc.load("a@b"), "hunter2")
+            self.assertTrue(kc.has("a@b"))
+            self.assertIsNone(kc.load("missing"))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)   # private to its owner
+            self.assertTrue(kc.forget("a@b")[0])
+            self.assertFalse(kc.forget("a@b")[0])
+            self.assertFalse(kc.encrypted())                       # and the panel says so
+
+    def test_keyring_commands_run_as_the_invoking_user(self):
+        from unittest import mock
+        from ocpanel import keychain as kc
+        import types
+        with mock.patch.object(kc, "_invoking_user", lambda: "someone"), \
+             mock.patch.object(plat, "MACOS", False), \
+             mock.patch.object(kc.pwd, "getpwnam",
+                               lambda n: types.SimpleNamespace(pw_uid=1000)), \
+             mock.patch.dict(os.environ, {}, clear=True):
+            cmd = kc._as_user(["secret-tool", "lookup"])
+        self.assertEqual(cmd[:3], ["sudo", "-u", "someone"])
+        self.assertIn("XDG_RUNTIME_DIR=/run/user/1000", cmd)
+        self.assertIn("env", cmd)                   # not `sudo VAR=...`, sudoers may refuse
+        self.assertIn("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus", cmd)
+
+    def test_macos_needs_no_session_bus(self):
+        from unittest import mock
+        from ocpanel import keychain as kc
+        with mock.patch.object(kc, "_invoking_user", lambda: "someone"), \
+             mock.patch.object(plat, "MACOS", True):
+            self.assertEqual(kc._as_user(["security", "find-generic-password"]),
+                             ["sudo", "-u", "someone", "security",
+                              "find-generic-password"])

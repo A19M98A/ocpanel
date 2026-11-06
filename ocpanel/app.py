@@ -19,7 +19,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, RichLog, Static, TabbedContent, TabPane
 
-from . import keychain as kc, netinfo, proxy, rules as R, sdr, services, ui, vpn
+from . import keychain as kc, netinfo, plat, proxy, rules as R, sdr, services, ui, vpn
 from .config import (CONFIG_FILE, DEFAULT_THEME, MODE_DIRECT, MODE_VPN, Config,
                      Source, invoking_home, load_state, save_state)
 from .ui import (ConfirmScreen, ConnectScreen, FilterInput, HelpScreen, InfoPanel,
@@ -1388,7 +1388,7 @@ class OCPanel(App):
         hint = ("Pick the server to connect with. ocpanel runs it through sing-box as "
                 "an ordinary tunnel, so your bypass and VPN lists apply to it.")
         if not proxy.binary():
-            hint += "  sing-box is not installed: brew install sing-box"
+            hint += f"  {proxy.missing_hint()}"
         self.call_from_thread(self.push_screen,
                               PickerScreen("Servers", hint, choices,
                                            confirm="Use this one"),
@@ -1756,6 +1756,9 @@ def reset_routes() -> int:
 
 
 def main() -> None:
+    if not (plat.MACOS or plat.LINUX):
+        sys.exit(f"ocpanel runs on macOS and Linux; this is {plat.NAME}. It works by "
+                 "editing the routing table, which every system spells differently.")
     if "--reset" in sys.argv[1:]:
         sys.exit(reset_routes())
     app = OCPanel()

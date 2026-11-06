@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import plat
 from .config import CONFIG_DIR, Profile
 
 PID_FILE = CONFIG_DIR / "openconnect.pid"
@@ -159,6 +160,8 @@ def pid_from_file() -> int | None:
 # those by name, so the panel can drive them without knowing the protocol.
 
 def _scutil(args: list[str], timeout: float = 20.0) -> tuple[int, str]:
+    if not plat.MACOS:
+        return -1, "system VPN configurations are a macOS feature"
     cmd = ["scutil", "--nc", *args]
     if os.geteuid() == 0 and os.environ.get("SUDO_USER"):
         cmd = ["sudo", "-u", os.environ["SUDO_USER"], *cmd]   # configs are per user

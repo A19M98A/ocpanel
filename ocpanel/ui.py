@@ -17,7 +17,7 @@ from textual.widgets import (Button, Checkbox, Input, Label, SelectionList, Spar
                              Static)
 from textual.widgets.selection_list import Selection
 
-from . import rules as R
+from . import keychain, rules as R
 
 
 # ------------------------------------------------------------------- keymap
@@ -353,7 +353,7 @@ class ConnectScreen(Dialog):
             yield Input(self._user, placeholder="your account", id="user")
             yield Label("Password", classes="field")
             yield Input(placeholder="not shown", password=True, id="password")
-            yield Checkbox("Remember it in my macOS login keychain",
+            yield Checkbox(f"Remember it in my {keychain.store_name()}",
                            value=self._remember, id="remember")
             yield Static(key_hints([("Enter", "connect"), ("Tab", "next field"),
                                     ("Space", "tick remember"),

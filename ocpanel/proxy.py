@@ -22,6 +22,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import plat
 from .config import CONFIG_DIR
 
 CONFIG_FILE = CONFIG_DIR / "sing-box.json"
@@ -31,7 +32,6 @@ LOG_FILE = CONFIG_DIR / "sing-box.log"
 # Where the tunnel lives. A /30 inside the shared-address range, so it cannot
 # collide with a home network.
 TUN_ADDRESS = "172.19.0.1/30"
-TUN_NAME = "utun"
 
 SUPPORTED = ("vless", "vmess", "trojan")
 LINK_SCHEMES = tuple(f"{s}://" for s in SUPPORTED)
@@ -42,8 +42,19 @@ def looks_like_link(text: str) -> bool:
     return text.strip().lower().startswith(LINK_SCHEMES)
 
 
+# Homebrew on Apple silicon and Intel, then the usual Linux package locations,
+# then whatever is on PATH.
+SINGBOX_PATHS = ("/opt/homebrew/bin/sing-box", "/usr/local/bin/sing-box",
+                 "/usr/bin/sing-box", "/usr/sbin/sing-box",
+                 "/snap/bin/sing-box", "sing-box")
+
+
+def missing_hint() -> str:
+    return f"sing-box is not installed ({plat.install_hint('sing-box')})"
+
+
 def binary() -> str | None:
-    for path in ("/opt/homebrew/bin/sing-box", "/usr/local/bin/sing-box", "sing-box"):
+    for path in SINGBOX_PATHS:
         try:
             if subprocess.run([path, "version"], capture_output=True,
                               timeout=10).returncode == 0:
@@ -290,7 +301,7 @@ def write_config(server: Server, *, socks_port: int = 0,
 def check_config(path: Path) -> tuple[bool, str]:
     exe = binary()
     if not exe:
-        return False, "sing-box is not installed (brew install sing-box)"
+        return False, missing_hint()
     try:
         p = subprocess.run([exe, "check", "-c", str(path)],
                            capture_output=True, text=True, timeout=20)
@@ -313,7 +324,7 @@ def start(server: Server, *, socks_port: int = 0, wait: float = 12.0) -> Run:
     """Start sing-box in the background and wait for it to settle."""
     exe = binary()
     if not exe:
-        return Run(False, "sing-box is not installed (brew install sing-box)")
+        return Run(False, missing_hint())
     if not socks_port and os.geteuid() != 0:
         return Run(False, "a tunnel needs root - run the panel with sudo")
     path = write_config(server, socks_port=socks_port)
