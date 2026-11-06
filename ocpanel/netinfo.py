@@ -431,3 +431,37 @@ def probe(target: str, port: int = 443, timeout: float = 8.0,
             sock.close()
         except OSError:
             pass
+
+
+# ------------------------------------------------- is the route table obeyed?
+#
+# A VPN built on NetworkExtension can set includeAllNetworks, which makes macOS
+# hand every packet to the tunnel *below* the routing table. Routes still exist
+# and `route get` still reports them, but nothing follows them. The only honest
+# way to tell is to ask the kernel which source address it would really use.
+
+def effective_source(target: str, port: int = 443) -> str:
+    """The local address the kernel would use for `target`. Sends nothing."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return ""
+    try:
+        s.connect((target, port))
+        return s.getsockname()[0]
+    except OSError:
+        return ""
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def captured(target: str, physical_addr: str) -> bool:
+    """True when traffic for `target` leaves by something other than the
+    physical interface, no matter what the routing table says."""
+    if not physical_addr:
+        return False
+    src = effective_source(target)
+    return bool(src) and src != physical_addr

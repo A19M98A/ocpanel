@@ -145,6 +145,30 @@ public resolver such as `1.1.1.1`, as opposed to your own LAN router) are pinned
 tunnel. Lookups keep being answered by the VPN's resolvers, so a hostname on your VPN list
 cannot be resolved to something else by your ISP.
 
+## When a VPN takes everything
+
+A VPN built on NetworkExtension can set Apple's **`includeAllNetworks`**. macOS then hands
+every packet to the tunnel *below* the routing table: the routes are still installed,
+`route get` still reports them, and nothing follows them. **No route-based split tunnelling
+can work against such a client** — not ocpanel's, not anyone's.
+
+ocpanel detects this instead of pretending otherwise. It asks the kernel which source
+address it would really use for each rule, and if a rule's route points at the physical
+link while the traffic still leaves by the tunnel, the Route column says
+
+```
+⚠ overridden by utun5
+```
+
+and a banner names the client responsible. V2Box is one of these: it sets
+`includeAllNetworks = true`.
+
+**What to do instead.** Split the traffic inside that client — V2Ray/Xray/sing-box all have
+a routing engine, and theirs can match on domains, which routes never can. Add a rule
+sending the hosts you want outside the proxy to the client's `direct` outbound. Or
+disconnect it and use a VPN that leaves the routing table alone, such as openconnect, where
+ocpanel's rules apply normally.
+
 ## Is it actually working?
 
 The **Route** column tells you where the kernel sends a rule's traffic. That is not the
@@ -324,6 +348,8 @@ A `target` is a hostname, an IPv4 address, a subnet (`203.0.113.0/24`), or `serv
 - **A tunnel is required.** Clients that only expose a local proxy port are out of scope
   (see above).
 - Only services that publish their IP ranges can be added with `s`.
+- **A client with `includeAllNetworks` cannot be split by routes at all** (see above). The
+  panel detects it and says so rather than showing rules that do nothing.
 
 ## Development
 

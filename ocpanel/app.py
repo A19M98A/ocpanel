@@ -56,7 +56,10 @@ class Snapshot:
     rx_phy: int = 0
     tx_phy: int = 0
     taken: float = 0.0
+    physical_addr: str = ""
     verified: dict[str, str] = field(default_factory=dict)   # rule target -> iface
+    captured: dict[str, bool] = field(default_factory=dict)  # rule target -> overridden?
+    enforced: bool = False      # the tunnel takes everything, routes or not
     halves: dict[str, netinfo.Link] = field(default_factory=dict)  # 0/1, 128/1 routes
 
 
@@ -104,6 +107,7 @@ class OCPanel(App):
         self._built = False                         # set once the screen is fully built
         self._connecting = False                    # a connect attempt is running
         self._quitting = False
+        self._warned_enforced = False
 
     # ---------------------------------------------------------------- layout
 
@@ -219,6 +223,7 @@ class OCPanel(App):
             snap.rx_tun, snap.tx_tun = netinfo.iface_bytes(snap.tunnel.iface)
         if snap.physical:
             snap.rx_phy, snap.tx_phy = netinfo.iface_bytes(snap.physical.iface)
+            snap.physical_addr = netinfo.iface_addr(snap.physical.iface)
         snap.provider = netinfo.tunnel_provider()
         snap.dns = netinfo.dns_servers()
         snap.halves = netinfo.half_default_routes()
@@ -228,8 +233,20 @@ class OCPanel(App):
                 rule.networks()
         for rule in self.cfg.active_rules:
             nets = rule.networks()
-            snap.verified[rule.target] = netinfo.route_iface(
-                str(nets[0].network_address)) if nets else ""
+            if not nets:
+                snap.verified[rule.target] = ""
+                continue
+            addr = str(nets[0].network_address)
+            snap.verified[rule.target] = netinfo.route_iface(addr)
+            # A route can be installed and still be ignored - ask the kernel
+            # which source it would really use.
+            snap.captured[rule.target] = netinfo.captured(addr, snap.physical_addr)
+        # If a route points at the physical link and the traffic still leaves by
+        # the tunnel, this VPN is taking everything (includeAllNetworks).
+        phys = snap.physical.iface if snap.physical else ""
+        snap.enforced = any(
+            snap.captured.get(r.target) and snap.verified.get(r.target) == phys
+            for r in self.cfg.active_rules if r.enabled)
         self.call_from_thread(self.apply_snapshot, snap)
 
     def apply_snapshot(self, snap: Snapshot) -> None:
@@ -249,6 +266,7 @@ class OCPanel(App):
         self.render_status()
         self.render_panels()
         self.refresh_rules()
+        self.warn_if_enforced(snap)
         if not R.is_root() or snap.physical is None:
             return
         # Routes point at a specific gateway and tunnel. macOS does not repoint
@@ -277,6 +295,24 @@ class OCPanel(App):
             return "ok" if len(ours) == 2 else "not applied"
         return "ok" if not ours else "stale"
 
+    def warn_if_enforced(self, snap: Snapshot) -> None:
+        """Say it once, loudly: the routes are being ignored."""
+        if snap.enforced == self._warned_enforced:
+            return
+        self._warned_enforced = snap.enforced
+        banner = self.query_one("#banner", Static)
+        if snap.enforced:
+            who = snap.provider.label if snap.provider else "this VPN"
+            banner.update(f" {who} takes all traffic (includeAllNetworks) - bypass "
+                          "routes have no effect. Split the traffic in that app "
+                          "instead, or disconnect it. ")
+            banner.add_class("visible")
+            self.log_line(f"{escape(who)} is set to capture every packet, so the "
+                          "routing table is ignored - the rules below are not in "
+                          "force. Press v to confirm any of them.", "red")
+        elif R.is_root():
+            banner.remove_class("visible")
+
     def render_status(self) -> None:
         s, p = self.snap, self.pal
         left = Text()
@@ -301,7 +337,10 @@ class OCPanel(App):
         if s.provider and s.provider.started:
             left.append(f"   up {human_secs(time.time() - s.provider.started)}", style=p.muted)
         state = self.direct_routes_state()
-        if state != "ok" and self._prev is not None:
+        if s.enforced:
+            left.append("   ! routes ignored - this VPN takes all traffic",
+                        style=f"bold {p.bad}")
+        elif state != "ok" and self._prev is not None:
             left.append(f"   ! direct routes {state} - press p", style=f"bold {p.warn}")
         right = Text()
         if R.is_root():
@@ -409,6 +448,10 @@ class OCPanel(App):
         if not iface:
             return ("checking…", p.muted)
         tunnelled = netinfo.is_tunnel(iface)
+        if iface == phy and self.snap.captured.get(rule.target):
+            # The route says physical, the kernel disagrees. Say so plainly.
+            return (f"⚠ overridden by {self.snap.tunnel.iface if self.snap.tunnel else 'the VPN'}",
+                    f"bold {p.bad}" if rule.enabled else p.muted)
         if tunnelled:
             label, wanted = f"▸ vpn · {iface}", self.direct_mode
         elif iface == phy:

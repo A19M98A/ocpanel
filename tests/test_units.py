@@ -286,3 +286,30 @@ class TestProbe(unittest.TestCase):
             self.assertTrue("dropped" in p.detail or "no reply" in p.detail, p.detail)
         finally:
             srv.close()
+
+
+class TestRouteEnforcement(unittest.TestCase):
+    """A route can be installed and still be ignored by the system."""
+
+    def test_effective_source_is_a_local_address(self):
+        from ocpanel.netinfo import effective_source
+        src = effective_source("127.0.0.1")
+        self.assertEqual(src, "127.0.0.1")
+
+    def test_effective_source_survives_an_unroutable_target(self):
+        from ocpanel.netinfo import effective_source
+        self.assertIsInstance(effective_source("0.0.0.0"), str)   # no crash
+
+    def test_captured_is_false_when_the_source_matches_the_physical_link(self):
+        from ocpanel import netinfo
+        self.assertFalse(netinfo.captured("127.0.0.1", "127.0.0.1"))
+
+    def test_captured_is_true_when_something_else_takes_the_traffic(self):
+        from ocpanel import netinfo
+        # The physical link is not the address the kernel would use, so the
+        # traffic is leaving somewhere else - the includeAllNetworks case.
+        self.assertTrue(netinfo.captured("127.0.0.1", "192.0.2.77"))
+
+    def test_unknown_physical_address_is_not_reported_as_captured(self):
+        from ocpanel import netinfo
+        self.assertFalse(netinfo.captured("127.0.0.1", ""))
