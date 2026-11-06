@@ -313,3 +313,68 @@ class TestRouteEnforcement(unittest.TestCase):
     def test_unknown_physical_address_is_not_reported_as_captured(self):
         from ocpanel import netinfo
         self.assertFalse(netinfo.captured("127.0.0.1", ""))
+
+
+class TestSubscription(unittest.TestCase):
+    """Parsing a subscription and turning it into a sing-box config."""
+
+    VLESS_TCP = "vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?encryption=none&security=none&type=tcp#tcp-one"
+    VLESS_WS_TLS = "vless://11111111-2222-3333-4444-555555555555@vpn.example.com:2096?encryption=none&security=tls&type=ws&path=%2Fws&host=cdn.example.com&sni=cdn.example.com#ws-one"
+    VLESS_PQ = "vless://11111111-2222-3333-4444-555555555555@vpn.example.com:2095?encryption=mlkem768x25519plus.native.0rtt.AAAA&security=none&type=ws&path=%2F#pq-one"
+
+    def test_tcp_entry(self):
+        from ocpanel.proxy import parse_uri
+        s = parse_uri(self.VLESS_TCP)
+        self.assertEqual((s.protocol, s.host, s.port, s.transport, s.tls),
+                         ("vless", "vpn.example.com", 443, "tcp", False))
+        self.assertEqual(s.name, "tcp-one")
+        self.assertEqual(s.unsupported, "")
+
+    def test_websocket_with_tls_keeps_path_host_and_sni(self):
+        from ocpanel.proxy import parse_uri
+        s = parse_uri(self.VLESS_WS_TLS)
+        out = s.outbound()
+        self.assertEqual(out["transport"], {"type": "ws", "path": "/ws",
+                                            "headers": {"Host": "cdn.example.com"}})
+        self.assertTrue(out["tls"]["enabled"])
+        self.assertEqual(out["tls"]["server_name"], "cdn.example.com")
+
+    def test_xray_only_encryption_is_refused_rather_than_silently_broken(self):
+        from ocpanel.proxy import parse_uri
+        s = parse_uri(self.VLESS_PQ)
+        self.assertIn("Xray", s.unsupported)
+
+    def test_base64_subscription_is_decoded(self):
+        import base64
+        from ocpanel.proxy import parse_subscription
+        body = base64.b64encode(f"{self.VLESS_TCP}\n{self.VLESS_PQ}".encode()).decode()
+        servers = parse_subscription(body)
+        self.assertEqual([s.name for s in servers], ["tcp-one", "pq-one"])
+
+    def test_plain_text_subscription_also_works(self):
+        from ocpanel.proxy import parse_subscription
+        self.assertEqual(len(parse_subscription(self.VLESS_TCP)), 1)
+
+    def test_junk_is_ignored_not_raised(self):
+        from ocpanel.proxy import parse_subscription
+        self.assertEqual(parse_subscription("not a uri\n\nhttp://example.com"), [])
+
+    def test_tunnel_config_keeps_the_routing_table_ordinary(self):
+        from ocpanel.proxy import build_config, parse_uri
+        cfg = build_config(parse_uri(self.VLESS_TCP))
+        tun = cfg["inbounds"][0]
+        self.assertEqual(tun["type"], "tun")
+        self.assertTrue(tun["auto_route"])
+        # strict_route would install firewall rules that defeat ocpanel's own routes
+        self.assertFalse(tun["strict_route"])
+        self.assertTrue(cfg["route"]["auto_detect_interface"])
+
+    def test_socks_mode_has_no_tunnel(self):
+        from ocpanel.proxy import build_config, parse_uri
+        cfg = build_config(parse_uri(self.VLESS_TCP), socks_port=1080)
+        self.assertEqual([i["type"] for i in cfg["inbounds"]], ["socks"])
+
+    def test_singbox_provider_can_be_stopped(self):
+        from ocpanel.netinfo import Provider
+        self.assertTrue(Provider(kind="sing-box", name="sing-box", pid=10).controllable)
+        self.assertFalse(Provider(kind="sing-box", name="sing-box").controllable)

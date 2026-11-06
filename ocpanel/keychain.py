@@ -14,6 +14,7 @@ import pwd
 import subprocess
 
 SERVICE = "ocpanel-vpn"
+SUBSCRIPTION_ACCOUNT = "subscription"
 TIMEOUT = 15.0
 
 

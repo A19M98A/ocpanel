@@ -55,7 +55,7 @@ worked.
 | | |
 |---|---|
 | OS | macOS (11 or newer; uses BSD `route`, `netstat`, `scutil`, `security`) |
-| VPN client | [`openconnect`](https://formulae.brew.sh/formula/openconnect) (`brew install openconnect`), **or** any client macOS registers as a system VPN (V2Box, WireGuard…) |
+| VPN client | [`openconnect`](https://formulae.brew.sh/formula/openconnect), any client macOS registers as a system VPN (V2Box, WireGuard…), or [`sing-box`](https://sing-box.sagernet.org/) to run a VLESS/VMess/Trojan subscription from the panel itself |
 | Python | 3.10+ |
 | Privileges | `sudo` to change routes. Without it the panel runs read-only. |
 
@@ -144,6 +144,27 @@ tunnel interface, so they still go through it.
 public resolver such as `1.1.1.1`, as opposed to your own LAN router) are pinned to the
 tunnel. Lookups keep being answered by the VPN's resolvers, so a hostname on your VPN list
 cannot be resolved to something else by your ISP.
+
+## Running a VLESS / VMess / Trojan subscription
+
+ocpanel can be the client itself. Press **`o`**, paste a subscription URL once, and pick a
+server; **`c`** then brings it up through [sing-box](https://sing-box.sagernet.org/)
+(`brew install sing-box`).
+
+The point is not to replace your proxy app — it is that **sing-box run this way creates an
+ordinary `utun` with ordinary routes**, so every rule in this panel applies to it. A client
+that sets `includeAllNetworks` (see below) cannot be split at all; this one can.
+
+- The subscription URL is a credential. It lives in your **login keychain**, never in
+  `config.json`, and never on a command line.
+- The generated sing-box config is written to `~/.config/ocpanel/sing-box.json` with mode
+  `600`, validated with `sing-box check` before anything starts, and uses
+  `strict_route: false` so the routing table stays ordinary and your rules can override it.
+- Entries ocpanel cannot run are listed and labelled rather than silently failing — for
+  example Xray's post-quantum VLESS encryption (`encryption=mlkem768…`), which sing-box
+  does not implement.
+- `D` stops it, `R` restarts it, and `--reset` stops it too if you ever need the escape
+  hatch.
 
 ## When a VPN takes everything
 
@@ -251,7 +272,8 @@ the one you are using; `f` reads the running game's actual sockets.
 | `p` | re-apply every route for the current mode |
 | `x` | remove the routes of the list in use |
 | `r` | refresh, and reload the config from disk |
-| `c` | connect with openconnect (in the background) |
+| `c` | connect — openconnect or your subscription, whichever the profile uses |
+| `o` | pick a server from your subscription link |
 | `C` | connect in the terminal — for a server that asks for 2FA, a group or a certificate |
 | `R` | reconnect — openconnect, or restart a system VPN |
 | `D` | disconnect whatever owns the tunnel |
@@ -367,7 +389,8 @@ python3 -m venv venv && ./venv/bin/pip install textual
 | `ocpanel/rules.py` | a rule, and the `route` calls that install one |
 | `ocpanel/vpn.py` | starting and stopping openconnect, and system VPNs via `scutil --nc` |
 | `ocpanel/services.py`, `ocpanel/sdr.py` | published IP ranges; Valve's relay directory |
-| `ocpanel/keychain.py` | the saved password |
+| `ocpanel/keychain.py` | the saved password and subscription link |
+| `ocpanel/proxy.py` | subscriptions: parsing, sing-box config, starting and stopping |
 | `ocpanel/app.tcss` | the stylesheet — every colour is a theme variable |
 
 Adding a key is one line in `KEYMAP` (`ui.py`) plus an `action_*` method: the binding, the

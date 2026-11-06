@@ -63,8 +63,9 @@ KEYMAP: list[tuple[str, list[Key]]] = [
         Key("r", "refresh", "Refresh, and reload the config file from disk"),
     ]),
     ("Connection", [
-        Key("c", "connect", "Connect with openconnect - asks for your password, "
-            "then runs in the background"),
+        Key("c", "connect", "Connect - openconnect or your subscription, "
+            "whichever this profile uses"),
+        Key("o", "choose_server", "Pick a server from your subscription link"),
         Key("C", "connect_in_terminal",
             "Connect in the terminal, if the server asks for more than a password"),
         Key("R", "reconnect", "Reconnect the current tunnel (openconnect or a system VPN)"),
@@ -383,6 +384,55 @@ class ConnectScreen(Dialog):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self._submit() if event.button.id == "yes" else self.dismiss(None)
+
+
+class PromptScreen(Dialog):
+    """One line of text. Used for the subscription URL, which is a credential."""
+
+    BINDINGS = [
+        Binding("enter", "submit", "OK", show=False, priority=True),
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, title: str, hint: str, value: str = "",
+                 placeholder: str = "", secret: bool = False) -> None:
+        super().__init__()
+        self._title, self._hint = title, hint
+        self._value, self._placeholder, self._secret = value, placeholder, secret
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label(self._title, classes="title")
+            yield Static(self._hint, classes="body")
+            yield Input(self._value, placeholder=self._placeholder,
+                        password=self._secret, id="value")
+            yield Static(key_hints([("Enter", "ok"), ("Esc", "cancel")], self.pal()),
+                         classes="keys")
+            with Horizontal(classes="footer"):
+                yield Button("Cancel", id="no")
+                yield Button("OK", id="yes", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#value", Input).focus()
+
+    def action_submit(self) -> None:
+        if isinstance(self.focused, Button):
+            self.focused.press()
+            return
+        value = self.query_one("#value", Input).value.strip()
+        self.dismiss(value or None)
+
+    def on_input_submitted(self) -> None:
+        self.action_submit()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "yes":
+            self.action_submit()
+        else:
+            self.dismiss(None)
 
 
 class QuitScreen(Dialog):

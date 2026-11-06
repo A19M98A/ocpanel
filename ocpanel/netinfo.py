@@ -337,14 +337,27 @@ class Provider:
     @property
     def controllable(self) -> bool:
         """Can the panel stop this one, or is it someone else's business?"""
-        return self.kind == "openconnect" and self.pid is not None or (
-            self.kind == "ne-vpn" and bool(self.service))
+        if self.kind in ("openconnect", "sing-box"):
+            return self.pid is not None
+        if self.kind == "ne-vpn":
+            return bool(self.service)
+        return False
 
     @property
     def label(self) -> str:
         if self.kind == "ne-vpn":
             return f"{self.name} (system VPN)"
         return self.name
+
+
+def singbox_provider(tunnel: "Link | None") -> "Provider | None":
+    """A sing-box the panel started. Imported lazily to avoid a cycle."""
+    from . import proxy
+    pid = proxy.running_pid()
+    if pid is None:
+        return None
+    return Provider(kind="sing-box", name="sing-box", pid=pid,
+                    iface=tunnel.iface if tunnel else "")
 
 
 def tunnel_provider() -> Provider | None:
@@ -354,6 +367,9 @@ def tunnel_provider() -> Provider | None:
     reported, because the routing side works either way.
     """
     tunnel = tunnel_link()
+    ours = singbox_provider(tunnel)
+    if ours is not None:
+        return ours
     sessions = openconnect_sessions()
     if sessions:
         s = sessions[0]

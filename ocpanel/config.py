@@ -75,6 +75,9 @@ class Profile:
     # True once you have ticked "remember" - the password itself lives in the
     # macOS login keychain, never here. See keychain.py.
     save_password: bool = False
+    # "openconnect" or "subscription" (a VLESS/VMess/Trojan link run by sing-box).
+    kind: str = "openconnect"
+    server_name: str = ""          # the chosen entry from the subscription
 
 
 @dataclass
@@ -111,6 +114,8 @@ class Config:
                 extra_args=list(prof.get("extra_args", [])),
                 auth_command=str(prof.get("auth_command", "")),
                 save_password=bool(prof.get("save_password", False)),
+                kind=str(prof.get("kind", "openconnect")),
+                server_name=str(prof.get("server_name", "")),
             ),
             rules=[Rule.from_dict(r) for r in raw.get("rules", []) if r.get("target")],
             vpn_rules=[Rule.from_dict(r) for r in raw.get("vpn_rules", []) if r.get("target")],
@@ -125,6 +130,8 @@ class Config:
                 "extra_args": self.profile.extra_args,
                 "auth_command": self.profile.auth_command,
                 "save_password": self.profile.save_password,
+                "kind": self.profile.kind,
+                "server_name": self.profile.server_name,
             },
             "mode": self.mode,
             "disconnect_on_quit": self.disconnect_on_quit,

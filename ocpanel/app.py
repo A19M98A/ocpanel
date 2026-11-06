@@ -19,11 +19,12 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, RichLog, Static, TabbedContent, TabPane
 
-from . import keychain as kc, netinfo, rules as R, sdr, services, ui, vpn
+from . import keychain as kc, netinfo, proxy, rules as R, sdr, services, ui, vpn
 from .config import (CONFIG_FILE, DEFAULT_THEME, MODE_DIRECT, MODE_VPN, Config,
                      invoking_home, load_state, save_state)
 from .ui import (ConfirmScreen, ConnectScreen, FilterInput, HelpScreen, InfoPanel,
-                 Palette, PickerScreen, QuitScreen, RuleScreen, StatusBar, TrafficPanel)
+                 Palette, PickerScreen, PromptScreen, QuitScreen, RuleScreen, StatusBar,
+                 TrafficPanel)
 
 
 def human_bytes(n: float) -> str:
@@ -371,6 +372,8 @@ class OCPanel(App):
             ("Uptime", human_secs(time.time() - s.provider.started)
              if s.provider and s.provider.started else "-"),
             ("PID", str(s.provider.pid) if s.provider and s.provider.pid else "-"),
+            ("Profile", f"subscription \u00b7 {self.cfg.profile.server_name}"
+             if self.cfg.profile.kind == "subscription" else "openconnect"),
             ("Password", "from auth_command" if self.cfg.profile.auth_command else
              (Text("saved in keychain", style=p.ok) if self.cfg.profile.save_password
               else "asked each time")),
@@ -1287,12 +1290,114 @@ class OCPanel(App):
         self.push_screen(ConnectScreen(profile.server, profile.user,
                                        profile.save_password, title), entered)
 
+    # ------------------------------------------------- subscription servers
+
+    def subscription_url(self) -> str | None:
+        return kc.load(kc.SUBSCRIPTION_ACCOUNT)
+
+    def action_choose_server(self) -> None:
+        """Pick which entry of the subscription link to run."""
+        if self.subscription_url():
+            self.load_servers()
+            return
+
+        def got(value: str | None) -> None:
+            if not value:
+                return
+            ok, detail = kc.save(kc.SUBSCRIPTION_ACCOUNT, value)
+            self.log_line(f"subscription link {escape(detail)}", "green" if ok else "red")
+            if ok:
+                self.load_servers()
+
+        self.push_screen(PromptScreen(
+            "Subscription link",
+            "A VLESS / VMess / Trojan subscription URL. It is a credential, so it goes "
+            "into your login keychain - never into the config file.",
+            placeholder="https://example.com/sub/...", secret=True), got)
+
+    @work(exclusive=True, thread=True, group="discover")
+    def load_servers(self) -> None:
+        url = self.subscription_url()
+        if not url:
+            return
+        self.call_from_thread(self.log_line, "fetching the subscription\u2026", "dim")
+        servers, err = proxy.fetch_subscription(url)
+        if not servers:
+            self.call_from_thread(self.notify, err or "nothing in that subscription",
+                                  severity="error", title="Subscription")
+            return
+        self._servers = {(s.name or s.host): s for s in servers}
+        chosen = self.cfg.profile.server_name
+        choices = [(s.label, s.name or s.host, (s.name or s.host) == chosen)
+                   for s in servers]
+        hint = ("Pick the one to connect with. ocpanel runs it through sing-box as an "
+                "ordinary tunnel, so your bypass and VPN lists apply to it - unlike a "
+                "client that captures all traffic.")
+        if not proxy.binary():
+            hint += "  sing-box is not installed: brew install sing-box"
+        self.call_from_thread(self.push_screen,
+                              PickerScreen("Subscription servers", hint, choices,
+                                           confirm="Use this one"),
+                              self.pick_server)
+
+    def pick_server(self, picked: list[str] | None) -> None:
+        if not picked:
+            return
+        name = picked[0]
+        server = getattr(self, "_servers", {}).get(name)
+        if server is None:
+            return
+        if server.unsupported:
+            self.notify(f"{name}: {server.unsupported}. Pick another entry.",
+                        severity="error", title="Cannot run this one", timeout=12)
+            return
+        self.cfg.profile.kind = "subscription"
+        self.cfg.profile.server_name = name
+        self.cfg.profile.server = server.host
+        self.cfg.save()
+        self.log_line(f"profile now uses [b]{escape(name)}[/b] from the subscription - "
+                      "press c to connect", "green")
+        self.render_panels()
+        self.refresh_bindings()
+
+    @work(exclusive=True, thread=True, group="connect")
+    def _subscription_connect(self, name: str) -> None:
+        url = self.subscription_url()
+        servers, err = proxy.fetch_subscription(url) if url else ([], "no subscription saved")
+        server = next((s for s in servers if (s.name or s.host) == name), None)
+        if server is None:
+            self.call_from_thread(self.connect_finished, vpn.Attempt(
+                False, err or f"{name} is no longer in the subscription"), None)
+            return
+        run = proxy.start(server)
+        self.call_from_thread(self.connect_finished,
+                              vpn.Attempt(run.ok, run.detail,
+                                          run.output or proxy.tail_log()), None)
+
+    @work(exclusive=True, thread=True, group="connect")
+    def _singbox_reconnect(self, pid: int | None) -> None:
+        ok, detail = proxy.stop(pid)
+        self.call_from_thread(self.log_line, escape(detail), "yellow" if ok else "red")
+        self._subscription_connect(self.cfg.profile.server_name)
+
     def action_connect(self) -> None:
-        """Ask for what openconnect needs, then connect without blocking the panel."""
+        """Connect with whichever client this profile uses, without blocking."""
         if self.snap.provider is not None or self._connecting:
             self.notify(f"Already connected through {self.snap.provider.label}."
                         if self.snap.provider else "A connection is already starting.",
                         severity="warning")
+            return
+        if self.cfg.profile.kind == "subscription":
+            if not self.cfg.profile.server_name:
+                self.notify("No server chosen yet - press o to pick one.",
+                            severity="warning", title="Subscription")
+                return
+            self._connecting = True
+            self.refresh_bindings()
+            self.render_status()
+            self.log_line(f"starting {escape(self.cfg.profile.server_name)} via "
+                          "sing-box\u2026", "bold")
+            self._subscription_connect(self.cfg.profile.server_name)
             return
         self.ask_to_connect("Connect", self.start_connect)
 
@@ -1301,6 +1406,16 @@ class OCPanel(App):
         if self._connecting:
             return
         provider = self.snap.provider
+        if provider is not None and provider.kind == "sing-box":
+            def again(yes: bool) -> None:
+                if yes:
+                    self._singbox_reconnect(provider.pid)
+
+            self.push_screen(ConfirmScreen(
+                "Reconnect the tunnel?",
+                "sing-box is stopped and started again with the same server. Every "
+                "connection through the tunnel will drop.", "Reconnect"), again)
+            return
         if provider is not None and provider.kind == "ne-vpn":
             # A system VPN (V2Box and friends): macOS restarts it by name, and
             # it needs no credentials from us.
@@ -1468,6 +1583,8 @@ class OCPanel(App):
             self.call_from_thread(self.remove_direct)
         if provider.kind == "ne-vpn":
             ok, detail = vpn.ne_stop(provider.service)
+        elif provider.kind == "sing-box":
+            ok, detail = proxy.stop(provider.pid)
         else:
             ok, detail = vpn.disconnect(provider.pid)
             if ok:
@@ -1493,6 +1610,9 @@ class OCPanel(App):
         if provider.kind == "ne-vpn":
             detail = (f"macOS stops {provider.name}. Every connection going through "
                       "the tunnel right now will drop.")
+        elif provider.kind == "sing-box":
+            detail = (f"This stops sing-box (pid {provider.pid}) and takes the tunnel "
+                      "down. Every connection through it will drop.")
         else:
             detail = (f"This stops openconnect (pid {provider.pid}). Every connection "
                       "going through the tunnel right now will drop.")
@@ -1503,6 +1623,8 @@ class OCPanel(App):
     def _stop_provider(self, provider: netinfo.Provider) -> None:
         if provider.kind == "ne-vpn":
             ok, detail = vpn.ne_stop(provider.service)
+        elif provider.kind == "sing-box":
+            ok, detail = proxy.stop(provider.pid)
         else:
             ok, detail = vpn.disconnect(provider.pid)
         self.call_from_thread(self.log_line, f"disconnect: {escape(detail)}",
@@ -1523,6 +1645,10 @@ def reset_routes() -> int:
     for server in state.get("dns_pins", []):
         R.delete_route(ipaddress.ip_network(f"{server}/32"))
     save_state({**state, "dns_pins": []})
+    pid = proxy.running_pid()
+    if pid:
+        ok, detail = proxy.stop(pid)
+        print(f"  sing-box: {detail}")
     cfg = Config.load()
     cfg.mode = MODE_VPN
     cfg.save()
