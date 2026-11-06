@@ -1328,6 +1328,9 @@ class OCPanel(App):
             return
         self._servers = {(s.name or s.host): s for s in servers}
         chosen = self.cfg.profile.server_name
+        if not any((s.name or s.host) == chosen for s in servers):
+            runnable = next((s for s in servers if not s.unsupported), None)
+            chosen = (runnable.name or runnable.host) if runnable else ""
         choices = [(s.label, s.name or s.host, (s.name or s.host) == chosen)
                    for s in servers]
         hint = ("Pick the one to connect with. ocpanel runs it through sing-box as an "
@@ -1342,6 +1345,7 @@ class OCPanel(App):
 
     def pick_server(self, picked: list[str] | None) -> None:
         if not picked:
+            self.log_line("no server chosen", "dim")
             return
         name = picked[0]
         server = getattr(self, "_servers", {}).get(name)

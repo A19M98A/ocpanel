@@ -500,7 +500,8 @@ class PickerScreen(Dialog):
             else:
                 yield Static("Nothing found.", classes="body")
             yield Static(key_hints([("Space", "tick"), ("a", "all"), ("n", "none"),
-                                    ("Enter", "add"), ("Esc", "cancel")], self.pal()),
+                                    ("Enter", "use ticked / highlighted"),
+                                    ("Esc", "cancel")], self.pal()),
                          classes="keys")
             with Horizontal(classes="footer"):
                 yield Button("Cancel", id="no")
@@ -532,19 +533,31 @@ class PickerScreen(Dialog):
         if isinstance(self.focused, Button):        # Tabbed onto a button: press it
             self.focused.press()
             return
+        self.dismiss(self.chosen())
+
+    def chosen(self) -> list[str] | None:
+        """What Enter should act on.
+
+        Ticked entries, or - when nothing is ticked - the highlighted row. In a
+        pick-one list that is what Enter obviously means, and without it Enter
+        silently does nothing at all.
+        """
         if not self._choices:
-            self.dismiss(None)
-            return
-        self.dismiss(list(self.query_one("#picks", SelectionList).selected) or None)
+            return None
+        picks = self.query_one("#picks", SelectionList)
+        selected = list(picks.selected)
+        if selected:
+            return selected
+        index = picks.highlighted
+        if index is None:
+            return None
+        return [picks.get_option_at_index(index).value]
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "yes" and self._choices:
-            self.dismiss(list(self.query_one("#picks", SelectionList).selected) or None)
-        else:
-            self.dismiss(None)
+        self.dismiss(self.chosen() if event.button.id == "yes" else None)
 
 
 class HelpScreen(Dialog):
