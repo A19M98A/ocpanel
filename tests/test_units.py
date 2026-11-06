@@ -378,3 +378,49 @@ class TestSubscription(unittest.TestCase):
         from ocpanel.netinfo import Provider
         self.assertTrue(Provider(kind="sing-box", name="sing-box", pid=10).controllable)
         self.assertFalse(Provider(kind="sing-box", name="sing-box").controllable)
+
+
+class TestSingBoxSchema(unittest.TestCase):
+    """The generated config must be valid for the installed sing-box.
+
+    A TUN config that `check` rejects is a connection that fails the moment the
+    user presses c, so this validates the mode that actually runs - not just the
+    SOCKS one that is convenient to test.
+    """
+
+    URI = ("vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443"
+           "?encryption=none&security=none&type=tcp#tcp-one")
+
+    def setUp(self):
+        from ocpanel import proxy
+        if not proxy.binary():
+            self.skipTest("sing-box is not installed")
+
+    def test_tun_inbound_has_no_legacy_fields(self):
+        from ocpanel.proxy import build_config, parse_uri
+        tun = build_config(parse_uri(self.URI))["inbounds"][0]
+        # Removed in sing-box 1.13; leaving them in makes the runtime refuse.
+        for gone in ("sniff", "sniff_override_destination", "domain_strategy",
+                     "inet4_address", "inet6_address"):
+            self.assertNotIn(gone, tun)
+
+    def test_sniffing_is_a_route_action(self):
+        from ocpanel.proxy import build_config, parse_uri
+        rules = build_config(parse_uri(self.URI))["route"]["rules"]
+        self.assertIn({"action": "sniff"}, rules)
+
+    def _check(self, **kwargs):
+        import tempfile
+        from pathlib import Path
+        from ocpanel.proxy import check_config, parse_uri, write_config
+        with tempfile.TemporaryDirectory() as d:
+            path = write_config(parse_uri(self.URI), path=Path(d) / "c.json", **kwargs)
+            return check_config(path)
+
+    def test_tun_config_passes_sing_box_check(self):
+        ok, detail = self._check()
+        self.assertTrue(ok, detail)
+
+    def test_socks_config_passes_sing_box_check(self):
+        ok, detail = self._check(socks_port=11080)
+        self.assertTrue(ok, detail)

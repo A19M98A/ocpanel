@@ -213,13 +213,14 @@ def build_config(server: Server, *, socks_port: int = 0) -> dict:
         inbounds.append({"type": "socks", "tag": "socks-in",
                          "listen": "127.0.0.1", "listen_port": socks_port})
     else:
+        # sing-box 1.11 moved sniffing out of the inbound and 1.13 removed the
+        # old fields outright, so it is a route action now (see below).
         inbounds.append({
             "type": "tun", "tag": "tun-in",
             "address": [TUN_ADDRESS],
             "auto_route": True,
             "strict_route": False,        # leave the routing table ordinary
             "stack": "gvisor",
-            "sniff": True,
         })
     return {
         "log": {"level": "warn", "timestamp": True},
@@ -244,7 +245,10 @@ def build_config(server: Server, *, socks_port: int = 0) -> dict:
             # or the tunnel cannot come up at all.
             "default_domain_resolver": {"server": "local"},
             "final": "proxy",
-            "rules": [{"ip_is_private": True, "outbound": "direct"}],
+            "rules": [
+                {"action": "sniff"},
+                {"ip_is_private": True, "outbound": "direct"},
+            ],
         },
     }
 
