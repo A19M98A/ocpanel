@@ -155,8 +155,35 @@ ModalScreen {
     margin-top: 1;
     align-horizontal: right;
 }
-#dialog .footer Button { margin-left: 1; min-width: 12; }
-#dialog Button:focus { text-style: bold; }
+
+/* Actions read as text, not boxes: no border, no fill, just a word you can
+   focus with Tab, activate with Enter, or click. */
+#dialog .footer Button {
+    border: none;
+    height: 1;
+    min-width: 0;
+    width: auto;
+    margin-left: 3;
+    padding: 0 1;
+    background: transparent;
+    color: $text-muted;
+    text-style: none;
+}
+#dialog .footer Button:hover {
+    background: transparent;
+    color: $foreground;
+    text-style: underline;
+}
+#dialog .footer Button:focus {
+    background: transparent;
+    color: $primary;
+    text-style: bold underline;
+}
+#dialog .footer Button.-primary,
+#dialog .footer Button.-error { background: transparent; }
+#dialog .footer Button.-primary { color: $primary; }
+#dialog .footer Button.-error { color: $error; }
+#dialog.danger .footer Button:focus { color: $error; }
 
 /* A ticked box has to read as ticked at a glance. */
 #dialog SelectionList {

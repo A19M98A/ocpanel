@@ -34,6 +34,12 @@ TUN_ADDRESS = "172.19.0.1/30"
 TUN_NAME = "utun"
 
 SUPPORTED = ("vless", "vmess", "trojan")
+LINK_SCHEMES = tuple(f"{s}://" for s in SUPPORTED)
+
+
+def looks_like_link(text: str) -> bool:
+    """A pasted server URI rather than a subscription URL."""
+    return text.strip().lower().startswith(LINK_SCHEMES)
 
 
 def binary() -> str | None:
@@ -183,6 +189,16 @@ def parse_subscription(body: str) -> list[Server]:
         if srv and srv.host and srv.port and srv.uuid:
             servers.append(srv)
     return servers
+
+
+def servers_from(kind: str, secret: str, timeout: float = 25.0) -> tuple[list[Server], str]:
+    """Servers from one source, whichever kind it is."""
+    if kind == "link" or looks_like_link(secret):
+        srv = parse_uri(secret.strip())
+        if srv is None or not (srv.host and srv.port and srv.uuid):
+            return [], "that link could not be read"
+        return [srv], ""
+    return fetch_subscription(secret, timeout)
 
 
 def fetch_subscription(url: str, timeout: float = 25.0) -> tuple[list[Server], str]:

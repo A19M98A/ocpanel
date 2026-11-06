@@ -14,7 +14,11 @@ import pwd
 import subprocess
 
 SERVICE = "ocpanel-vpn"
-SUBSCRIPTION_ACCOUNT = "subscription"
+SUBSCRIPTION_ACCOUNT = "subscription"        # the original single-subscription slot
+
+
+def source_account(source_id: str) -> str:
+    return f"source-{source_id}"
 TIMEOUT = 15.0
 
 

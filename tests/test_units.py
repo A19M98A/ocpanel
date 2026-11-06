@@ -424,3 +424,51 @@ class TestSingBoxSchema(unittest.TestCase):
     def test_socks_config_passes_sing_box_check(self):
         ok, detail = self._check(socks_port=11080)
         self.assertTrue(ok, detail)
+
+
+class TestSources(unittest.TestCase):
+    """Servers can come from a subscription URL or from one pasted link."""
+
+    LINK = ("vless://11111111-2222-3333-4444-555555555555@one.example.com:443"
+            "?encryption=none&security=none&type=tcp#just-one")
+
+    def test_a_pasted_uri_is_recognised_as_a_link(self):
+        from ocpanel.proxy import looks_like_link
+        self.assertTrue(looks_like_link(self.LINK))
+        self.assertTrue(looks_like_link("  TROJAN://x@h:443#n  "))
+        self.assertFalse(looks_like_link("https://example.com/sub/abc"))
+
+    def test_a_link_source_needs_no_network(self):
+        from ocpanel.proxy import servers_from
+        servers, err = servers_from("link", self.LINK)
+        self.assertEqual(err, "")
+        self.assertEqual([s.name for s in servers], ["just-one"])
+
+    def test_a_broken_link_is_reported(self):
+        from ocpanel.proxy import servers_from
+        servers, err = servers_from("link", "vless://nonsense")
+        self.assertEqual(servers, [])
+        self.assertTrue(err)
+
+    def test_a_link_pasted_into_the_subscription_slot_still_works(self):
+        from ocpanel.proxy import servers_from
+        servers, err = servers_from("subscription", self.LINK)
+        self.assertEqual([s.name for s in servers], ["just-one"])
+
+    def test_sources_round_trip_without_the_secret(self):
+        import json
+        from ocpanel.config import CONFIG_FILE, Config, Source
+        cfg = Config()
+        cfg.sources = [Source(id="1", name="subscription", kind="subscription"),
+                       Source(id="2", name="link", kind="link")]
+        cfg.save()
+        again = Config.load()
+        self.assertEqual([(s.id, s.kind) for s in again.sources],
+                         [("1", "subscription"), ("2", "link")])
+        raw = json.loads(CONFIG_FILE.read_text())
+        self.assertNotIn("http", json.dumps(raw["sources"]))   # no URL on disk
+
+    def test_keychain_account_is_per_source(self):
+        from ocpanel.keychain import source_account
+        self.assertNotEqual(source_account("1"), source_account("2"))
+        self.assertIn("1", source_account("1"))

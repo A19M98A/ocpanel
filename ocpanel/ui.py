@@ -65,7 +65,8 @@ KEYMAP: list[tuple[str, list[Key]]] = [
     ("Connection", [
         Key("c", "connect", "Connect - openconnect or your subscription, "
             "whichever this profile uses"),
-        Key("o", "choose_server", "Pick a server from your subscription link"),
+        Key("o", "choose_server",
+            "Pick a server, or add a subscription URL / a single vless:// link"),
         Key("C", "connect_in_terminal",
             "Connect in the terminal, if the server asks for more than a password"),
         Key("R", "reconnect", "Reconnect the current tunnel (openconnect or a system VPN)"),

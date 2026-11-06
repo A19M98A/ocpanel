@@ -147,9 +147,19 @@ cannot be resolved to something else by your ISP.
 
 ## Running a VLESS / VMess / Trojan subscription
 
-ocpanel can be the client itself. Press **`o`**, paste a subscription URL once, and pick a
-server; **`c`** then brings it up through [sing-box](https://sing-box.sagernet.org/)
+ocpanel can be the client itself. Press **`o`**, add where your servers come from, and
+pick one; **`c`** then brings it up through [sing-box](https://sing-box.sagernet.org/)
 (`brew install sing-box`).
+
+Two kinds of source, as many as you like, listed together:
+
+- **a subscription URL** — re-read every time you open the list, so new servers appear on
+  their own
+- **a single `vless://` / `vmess://` / `trojan://` link** — pasted straight in, no
+  subscription needed
+
+Both are added from inside the server list (`+ Add a subscription URL`, `+ Add a single
+server link`), and `− Remove a source` deletes one along with its keychain entry.
 
 The point is not to replace your proxy app — it is that **sing-box run this way creates an
 ordinary `utun` with ordinary routes**, so every rule in this panel applies to it. A client
@@ -273,16 +283,18 @@ the one you are using; `f` reads the running game's actual sockets.
 | `x` | remove the routes of the list in use |
 | `r` | refresh, and reload the config from disk |
 | `c` | connect — openconnect or your subscription, whichever the profile uses |
-| `o` | pick a server from your subscription link |
+| `o` | pick a server, or add a subscription URL / a single `vless://` link |
 | `C` | connect in the terminal — for a server that asks for 2FA, a group or a certificate |
 | `R` | reconnect — openconnect, or restart a system VPN |
 | `D` | disconnect whatever owns the tunnel |
 | `F` | forget the saved password |
 | `q` | quit |
 
-**Dialogs**: `y`/`n` confirm or cancel (`Esc` cancels too) · `Enter` presses the highlighted
-button, which is *Cancel* for anything destructive · `Tab` next field · in pick lists
-`Space` ticks, `a` all, `n` none, `Enter` adds.
+**Dialogs**: actions are plain text, not boxes — `Tab` moves between them, `Enter` or a
+click activates, and the focused one is underlined. `y`/`n` confirm or cancel (`Esc`
+cancels too); `Enter` takes the highlighted action, which is *Cancel* for anything
+destructive. In pick lists `Space` ticks, `a` all, `n` none, and `Enter` uses the ticked
+entries — or the highlighted one when nothing is ticked.
 
 **Anywhere**: `?` help · `Ctrl+P` command palette (it also changes the theme; the choice is
 remembered).

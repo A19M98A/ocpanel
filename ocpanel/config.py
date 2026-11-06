@@ -81,11 +81,32 @@ class Profile:
 
 
 @dataclass
+class Source:
+    """Where servers come from: a subscription URL, or one pasted link.
+
+    Only the name and kind live here - the URL itself is a credential and stays
+    in the login keychain under "source-<id>".
+    """
+    id: str
+    name: str
+    kind: str = "subscription"          # subscription | link
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "name": self.name, "kind": self.kind}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Source":
+        return cls(id=str(d.get("id", "")), name=str(d.get("name", "")),
+                   kind=str(d.get("kind", "subscription")))
+
+
+@dataclass
 class Config:
     profile: Profile = field(default_factory=Profile)
     mode: str = MODE_VPN
     disconnect_on_quit: bool = True                       # q takes the VPN down too
     theme: str = DEFAULT_THEME                            # any Textual theme name
+    sources: list[Source] = field(default_factory=list)   # subscriptions and links
     rules: list[Rule] = field(default_factory=list)       # bypass list (vpn mode)
     vpn_rules: list[Rule] = field(default_factory=list)   # VPN list (direct mode)
 
@@ -117,6 +138,7 @@ class Config:
                 kind=str(prof.get("kind", "openconnect")),
                 server_name=str(prof.get("server_name", "")),
             ),
+            sources=[Source.from_dict(x) for x in raw.get("sources", []) if x.get("id")],
             rules=[Rule.from_dict(r) for r in raw.get("rules", []) if r.get("target")],
             vpn_rules=[Rule.from_dict(r) for r in raw.get("vpn_rules", []) if r.get("target")],
         )
@@ -136,6 +158,7 @@ class Config:
             "mode": self.mode,
             "disconnect_on_quit": self.disconnect_on_quit,
             "theme": self.theme,
+            "sources": [x.to_dict() for x in self.sources],
             "rules": [r.to_dict() for r in self.rules],
             "vpn_rules": [r.to_dict() for r in self.vpn_rules],
         }

@@ -21,7 +21,7 @@ from textual.widgets import DataTable, Footer, RichLog, Static, TabbedContent, T
 
 from . import keychain as kc, netinfo, proxy, rules as R, sdr, services, ui, vpn
 from .config import (CONFIG_FILE, DEFAULT_THEME, MODE_DIRECT, MODE_VPN, Config,
-                     invoking_home, load_state, save_state)
+                     Source, invoking_home, load_state, save_state)
 from .ui import (ConfirmScreen, ConnectScreen, FilterInput, HelpScreen, InfoPanel,
                  Palette, PickerScreen, PromptScreen, QuitScreen, RuleScreen, StatusBar,
                  TrafficPanel)
@@ -1292,54 +1292,105 @@ class OCPanel(App):
 
     # ------------------------------------------------- subscription servers
 
-    def subscription_url(self) -> str | None:
-        return kc.load(kc.SUBSCRIPTION_ACCOUNT)
+    ADD_SUB = "\x00add-subscription"
+    ADD_LINK = "\x00add-link"
+    DROP_SOURCE = "\x00drop-source"
+
+    def sources(self) -> list[Source]:
+        """Every place servers come from, migrating the old single slot once."""
+        if not self.cfg.sources and kc.load(kc.SUBSCRIPTION_ACCOUNT):
+            legacy = Source(id="legacy", name="subscription", kind="subscription")
+            self.cfg.sources = [legacy]
+            self.cfg.save()
+        return self.cfg.sources
+
+    def source_secret(self, source: Source) -> str | None:
+        if source.id == "legacy":
+            return kc.load(kc.SUBSCRIPTION_ACCOUNT)
+        return kc.load(kc.source_account(source.id))
 
     def action_choose_server(self) -> None:
-        """Pick which entry of the subscription link to run."""
-        if self.subscription_url():
-            self.load_servers()
+        """Pick a server, or add somewhere to get servers from."""
+        if not self.sources():
+            self.add_source("subscription")
             return
+        self.load_servers()
+
+    def add_source(self, kind: str) -> None:
+        """Ask for a subscription URL or a single server link."""
+        if kind == "link":
+            title, hint, placeholder = (
+                "Add a server link",
+                "One vless:// , vmess:// or trojan:// URI. It is a credential, so it "
+                "goes into your login keychain - never into the config file.",
+                "vless://...")
+        else:
+            title, hint, placeholder = (
+                "Add a subscription",
+                "A subscription URL. ocpanel re-reads it every time you open this list, "
+                "so new servers appear on their own. Kept in your login keychain.",
+                "https://example.com/sub/...")
 
         def got(value: str | None) -> None:
             if not value:
                 return
-            ok, detail = kc.save(kc.SUBSCRIPTION_ACCOUNT, value)
-            self.log_line(f"subscription link {escape(detail)}", "green" if ok else "red")
-            if ok:
-                self.load_servers()
+            real = "link" if proxy.looks_like_link(value) else "subscription"
+            source = Source(id=f"{int(time.time())}", kind=real,
+                            name="link" if real == "link" else "subscription")
+            ok, detail = kc.save(kc.source_account(source.id), value)
+            if not ok:
+                self.log_line(f"could not save it: {escape(detail)}", "red")
+                return
+            self.cfg.sources.append(source)
+            self.cfg.save()
+            self.log_line(f"added a {real} - {escape(detail)}", "green")
+            self.load_servers()
 
-        self.push_screen(PromptScreen(
-            "Subscription link",
-            "A VLESS / VMess / Trojan subscription URL. It is a credential, so it goes "
-            "into your login keychain - never into the config file.",
-            placeholder="https://example.com/sub/...", secret=True), got)
+        self.push_screen(PromptScreen(title, hint, placeholder=placeholder,
+                                      secret=True), got)
+
+    def action_add_source(self) -> None:
+        self.add_source("subscription")
 
     @work(exclusive=True, thread=True, group="discover")
     def load_servers(self) -> None:
-        url = self.subscription_url()
-        if not url:
-            return
-        self.call_from_thread(self.log_line, "fetching the subscription\u2026", "dim")
-        servers, err = proxy.fetch_subscription(url)
-        if not servers:
-            self.call_from_thread(self.notify, err or "nothing in that subscription",
-                                  severity="error", title="Subscription")
-            return
-        self._servers = {(s.name or s.host): s for s in servers}
+        sources = self.sources()
+        self.call_from_thread(self.log_line,
+                              f"reading {len(sources)} source(s)\u2026", "dim")
+        self._servers, choices, problems = {}, [], []
         chosen = self.cfg.profile.server_name
-        if not any((s.name or s.host) == chosen for s in servers):
-            runnable = next((s for s in servers if not s.unsupported), None)
-            chosen = (runnable.name or runnable.host) if runnable else ""
-        choices = [(s.label, s.name or s.host, (s.name or s.host) == chosen)
-                   for s in servers]
-        hint = ("Pick the one to connect with. ocpanel runs it through sing-box as an "
-                "ordinary tunnel, so your bypass and VPN lists apply to it - unlike a "
-                "client that captures all traffic.")
+        for source in sources:
+            secret = self.source_secret(source)
+            if not secret:
+                problems.append(f"{source.name}: nothing saved in the keychain")
+                continue
+            servers, err = proxy.servers_from(source.kind, secret)
+            if err:
+                problems.append(f"{source.name}: {err}")
+            for srv in servers:
+                key = srv.name or srv.host
+                while key in self._servers:            # two sources, same name
+                    key += "*"
+                self._servers[key] = srv
+                choices.append((f"{key}{srv.label[len(srv.name or srv.host):]}",
+                                key, key == chosen))
+        if not any(on for _, _, on in choices):
+            for i, (label, value, _) in enumerate(choices):
+                if not self._servers[value].unsupported:
+                    choices[i] = (label, value, True)
+                    break
+        for problem in problems:
+            self.call_from_thread(self.log_line, escape(problem), "yellow")
+        choices.append(("+  Add a subscription URL", self.ADD_SUB, False))
+        choices.append(("+  Add a single server link (vless:// ...)", self.ADD_LINK, False))
+        if sources:
+            choices.append(("\u2212  Remove a source", self.DROP_SOURCE, False))
+        hint = ("Pick the server to connect with. ocpanel runs it through sing-box as "
+                "an ordinary tunnel, so your bypass and VPN lists apply to it.")
         if not proxy.binary():
             hint += "  sing-box is not installed: brew install sing-box"
         self.call_from_thread(self.push_screen,
-                              PickerScreen("Subscription servers", hint, choices,
+                              PickerScreen("Servers", hint, choices,
                                            confirm="Use this one"),
                               self.pick_server)
 
@@ -1348,6 +1399,15 @@ class OCPanel(App):
             self.log_line("no server chosen", "dim")
             return
         name = picked[0]
+        if name == self.ADD_SUB:
+            self.add_source("subscription")
+            return
+        if name == self.ADD_LINK:
+            self.add_source("link")
+            return
+        if name == self.DROP_SOURCE:
+            self.remove_source()
+            return
         server = getattr(self, "_servers", {}).get(name)
         if server is None:
             return
@@ -1364,14 +1424,49 @@ class OCPanel(App):
         self.render_panels()
         self.refresh_bindings()
 
+    def remove_source(self) -> None:
+        """Drop a subscription or link, and its keychain entry with it."""
+        sources = self.sources()
+        if not sources:
+            return
+        choices = [(f"{s.name}  ({s.kind})", s.id, False) for s in sources]
+
+        def dropped(picked: list[str] | None) -> None:
+            if not picked:
+                return
+            keep, gone = [], []
+            for s in sources:
+                if s.id in picked:
+                    kc.forget(kc.SUBSCRIPTION_ACCOUNT if s.id == "legacy"
+                              else kc.source_account(s.id))
+                    gone.append(s.name)
+                else:
+                    keep.append(s)
+            self.cfg.sources = keep
+            self.cfg.save()
+            self.log_line(f"removed {escape(', '.join(gone))} and its keychain entry",
+                          "yellow")
+
+        self.push_screen(PickerScreen(
+            "Remove a source",
+            "The source and its keychain entry are deleted. Servers you already "
+            "chose keep working until you pick another.", choices,
+            confirm="Remove"), dropped)
+
     @work(exclusive=True, thread=True, group="connect")
     def _subscription_connect(self, name: str) -> None:
-        url = self.subscription_url()
-        servers, err = proxy.fetch_subscription(url) if url else ([], "no subscription saved")
-        server = next((s for s in servers if (s.name or s.host) == name), None)
+        server = None
+        for source in self.sources():
+            secret = self.source_secret(source)
+            if not secret:
+                continue
+            servers, _ = proxy.servers_from(source.kind, secret)
+            server = next((s for s in servers if (s.name or s.host) == name), None)
+            if server is not None:
+                break
         if server is None:
             self.call_from_thread(self.connect_finished, vpn.Attempt(
-                False, err or f"{name} is no longer in the subscription"), None)
+                False, f"{name} is no longer in any of your sources"), None)
             return
         run = proxy.start(server)
         self.call_from_thread(self.connect_finished,
