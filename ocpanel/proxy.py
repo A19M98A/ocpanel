@@ -247,6 +247,8 @@ def build_config(server: Server, *, socks_port: int = 0) -> dict:
                 {"tag": "remote", "type": "udp", "server": "1.1.1.1", "detour": "proxy"},
                 {"tag": "local", "type": "udp", "server": "223.5.5.5"},
             ],
+            # The proxy's own hostname cannot be resolved through the proxy.
+            "rules": [{"domain": [server.host], "server": "local"}],
             "final": "remote",
             "strategy": "ipv4_only",
         },
@@ -263,6 +265,13 @@ def build_config(server: Server, *, socks_port: int = 0) -> dict:
             "final": "proxy",
             "rules": [
                 {"action": "sniff"},
+                # Answer DNS ourselves, through the proxy. Without this, queries
+                # go to whatever resolver DHCP handed out - and on a network that
+                # poisons DNS, every answer is a lie. The resolvers are usually
+                # LAN addresses, so this has to come before the private-IP rule
+                # below or they would be sent straight out.
+                {"protocol": "dns", "action": "hijack-dns"},
+                {"port": 53, "action": "hijack-dns"},
                 {"ip_is_private": True, "outbound": "direct"},
             ],
         },

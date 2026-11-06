@@ -536,3 +536,41 @@ class TestTunnelDetection(unittest.TestCase):
                 self.assertEqual(proxy.running_pid(), 4242)
             finally:
                 os.kill, proxy.PID_FILE = saved_kill, saved_file
+
+
+class TestDnsHandling(unittest.TestCase):
+    """On a network that poisons DNS, every answer must come from the proxy."""
+
+    URI = ("vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443"
+           "?encryption=none&security=none&type=tcp#one")
+
+    def config(self):
+        from ocpanel.proxy import build_config, parse_uri
+        return build_config(parse_uri(self.URI))
+
+    def test_dns_is_hijacked_before_private_addresses_go_direct(self):
+        rules = self.config()["route"]["rules"]
+        hijack = [i for i, r in enumerate(rules) if r.get("action") == "hijack-dns"]
+        private = [i for i, r in enumerate(rules) if r.get("ip_is_private")]
+        self.assertTrue(hijack, "DNS must be hijacked")
+        self.assertTrue(private, "private addresses should still go direct")
+        # Resolvers handed out by DHCP are usually LAN addresses: if the private
+        # rule came first, every query would leave unprotected.
+        self.assertLess(max(hijack), min(private))
+
+    def test_both_dns_over_port_53_and_sniffed_dns_are_caught(self):
+        rules = self.config()["route"]["rules"]
+        self.assertIn({"protocol": "dns", "action": "hijack-dns"}, rules)
+        self.assertIn({"port": 53, "action": "hijack-dns"}, rules)
+
+    def test_answers_come_from_the_proxy_by_default(self):
+        dns = self.config()["dns"]
+        remote = next(s for s in dns["servers"] if s["tag"] == "remote")
+        self.assertEqual(remote["detour"], "proxy")
+        self.assertEqual(dns["final"], "remote")
+
+    def test_the_proxy_hostname_resolves_without_the_proxy(self):
+        dns = self.config()["dns"]
+        rule = next(r for r in dns["rules"] if "domain" in r)
+        self.assertEqual(rule["domain"], ["vpn.example.com"])
+        self.assertEqual(rule["server"], "local")
