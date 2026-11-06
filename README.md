@@ -145,6 +145,28 @@ public resolver such as `1.1.1.1`, as opposed to your own LAN router) are pinned
 tunnel. Lookups keep being answered by the VPN's resolvers, so a hostname on your VPN list
 cannot be resolved to something else by your ISP.
 
+## Is it actually working?
+
+The **Route** column tells you where the kernel sends a rule's traffic. That is not the
+same as the target answering over that path. Some networks accept the TCP connection and
+then drop everything, so a site shows a perfectly green `en1 direct` and still never loads.
+
+`v` tests the selected rule for real: it opens the connection and completes a TLS
+handshake, then reports what happened.
+
+```
+dining2.example.ac.ir 203.0.113.204 via en1: connected, then silence (intercepted?)
+sso.example.ac.ir     203.0.113.150 via en1: TLS ok (TLSv1.3) (0.9s)
+```
+
+`V` does the same for every hostname and address rule on the list, in parallel. Subnets and
+services cover whole ranges with no single address to test, so they are skipped.
+
+**"connected, then silence" means the path is being intercepted.** A domestic site that
+your ISP filters can behave exactly like this when you bypass the VPN for it: the route is
+right, the handshake never completes. The fix is to turn that rule off (`space`) so the
+traffic goes back through the tunnel.
+
 ## Big services
 
 A hostname rule resolves to the one or two addresses DNS returns at that moment. That is
@@ -183,6 +205,8 @@ the one you are using; `f` reads the running game's actual sockets.
 | `u` | undo the last delete |
 | `t` | move the selected rule to the other list |
 | `s` | add a whole service by its published ranges |
+| `v` | test whether the selected rule's target really answers |
+| `V` | test every hostname/address rule on this list |
 | `g` | add Dota 2 relay clusters |
 | `f` | find what a running game is connected to |
 

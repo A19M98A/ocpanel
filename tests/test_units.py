@@ -205,3 +205,84 @@ class TestProviders(unittest.TestCase):
         from ocpanel.netinfo import Provider
         self.assertTrue(Provider(kind="openconnect", name="openconnect", pid=42).controllable)
         self.assertFalse(Provider(kind="openconnect", name="openconnect").controllable)
+
+
+class TestProbe(unittest.TestCase):
+    """A route being right is not the same as the target answering."""
+
+    def test_refused_port_is_reported_not_raised(self):
+        from ocpanel.netinfo import probe
+        p = probe("127.0.0.1", port=9, timeout=3)      # discard port, nothing listening
+        self.assertFalse(p.ok)
+        self.assertIn("no connection", p.detail)
+        self.assertLess(p.seconds, 3)
+
+    def test_a_plain_port_answering_counts_as_reachable(self):
+        import socket
+        import threading
+        from ocpanel.netinfo import probe
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+
+        def answer():
+            conn, _ = srv.accept()
+            conn.recv(64)
+            conn.sendall(b"HTTP/1.0 200 OK\r\n\r\n")
+            conn.close()
+
+        t = threading.Thread(target=answer, daemon=True)
+        t.start()
+        try:
+            p = probe("127.0.0.1", port=port, timeout=5)
+            self.assertTrue(p.ok, p.detail)
+            self.assertEqual(p.detail, "answered")
+        finally:
+            srv.close()
+
+    def test_accepting_then_staying_silent_is_a_failure(self):
+        """The case that broke a real site: the connection is accepted, then dropped."""
+        import socket
+        import threading
+        from ocpanel.netinfo import probe
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        held = []
+
+        def swallow():
+            conn, _ = srv.accept()
+            held.append(conn)          # accept and never answer
+
+        threading.Thread(target=swallow, daemon=True).start()
+        try:
+            p = probe("127.0.0.1", port=port, timeout=2)
+            self.assertFalse(p.ok)
+            self.assertIn("silence", p.detail)      # the intercepted-looking case
+        finally:
+            for c in held:
+                c.close()
+            srv.close()
+
+    def test_a_peer_that_closes_at_once_is_a_failure_too(self):
+        import socket
+        import threading
+        from ocpanel.netinfo import probe
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+
+        def hangup():
+            conn, _ = srv.accept()
+            conn.close()
+
+        threading.Thread(target=hangup, daemon=True).start()
+        try:
+            p = probe("127.0.0.1", port=port, timeout=3)
+            self.assertFalse(p.ok)
+            self.assertTrue("dropped" in p.detail or "no reply" in p.detail, p.detail)
+        finally:
+            srv.close()

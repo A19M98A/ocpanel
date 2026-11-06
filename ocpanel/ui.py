@@ -43,6 +43,8 @@ KEYMAP: list[tuple[str, list[Key]]] = [
         Key("u", "undo", "Undo the last delete"),
         Key("t", "transfer_rule", "Move the selected rule to the other list"),
         Key("s", "add_service", "Add a whole service by its published ranges", "Services"),
+        Key("v", "verify_rule", "Test whether the selected rule's target really answers", "Test"),
+        Key("V", "verify_all", "Test every host/address rule on this list"),
         Key("g", "add_relays", "Add Dota 2 relay clusters to the bypass list"),
         Key("f", "find_live", "Find what a running game is connected to"),
     ]),

@@ -608,6 +608,95 @@ class OCPanel(App):
         self.show_list(view)
         self.refresh_rules()
 
+    # --------------------------------------------------------- reachability
+    #
+    # A green Route column only means the kernel sends the traffic where this
+    # mode wants it. It cannot tell you the target answers over that path - a
+    # filtering middlebox will accept the TCP connection and then drop it. These
+    # actions open a real connection and find out.
+
+    TESTABLE = ("host", "address")
+
+    def probe_targets(self, rule: R.Rule) -> list[tuple[str, str | None]]:
+        """(address, TLS server name) pairs worth probing for a rule."""
+        if rule.kind == "host":
+            return [(ip, rule.target) for ip in rule.addresses[:3]]
+        if rule.kind == "address":
+            return [(rule.target.split("/")[0], None)]
+        return []
+
+    def action_verify_rule(self) -> None:
+        rule = self.selected_rule()
+        if rule is None:
+            return
+        if rule.kind not in self.TESTABLE:
+            self.notify(f"A {rule.kind} covers a whole range - there is no single "
+                        "address to test. Add a hostname or address to test one.",
+                        severity="warning", title="Nothing to test")
+            return
+        self.log_line(f"testing {escape(rule.target)}\u2026", "dim")
+        self._verify([rule])
+
+    def action_verify_all(self) -> None:
+        rules = [r for r in self.viewed_rules if r.kind in self.TESTABLE and r.enabled]
+        if not rules:
+            self.notify("No hostname or address rules on this list to test.",
+                        severity="warning", title="Nothing to test")
+            return
+        self.log_line(f"testing {len(rules)} rule(s) on the "
+                      f"{self.list_name(self.view)}\u2026", "bold")
+        self._verify(rules)
+
+    @work(exclusive=True, thread=True, group="verify")
+    def _verify(self, rules: list[R.Rule]) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        jobs = []
+        for rule in rules:
+            for addr, sni in self.probe_targets(rule):
+                jobs.append((rule, addr, sni))
+        if not jobs:
+            self.call_from_thread(self.notify, "Nothing resolved to test.",
+                                  severity="warning")
+            return
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(
+                lambda j: (j[0], j[1], netinfo.probe(j[1], tls_host=j[2])), jobs))
+        bad = []
+        for rule, addr, res in results:
+            where = f" via {res.iface}" if res.iface else ""
+            if res.ok:
+                self.call_from_thread(
+                    self.log_line,
+                    f"{escape(rule.target)} {addr}{where}: {escape(res.detail)} "
+                    f"({res.seconds:.1f}s)", "green")
+            else:
+                bad.append((rule, addr, res))
+                self.call_from_thread(
+                    self.log_line,
+                    f"{escape(rule.target)} {addr}{where}: {escape(res.detail)}", "red")
+        self.call_from_thread(self.verify_finished, len(results), bad)
+
+    def verify_finished(self, total: int, bad: list) -> None:
+        if not bad:
+            self.notify(f"All {total} address(es) answered.", title="Reachable")
+            return
+        names = sorted({r.target for r, _, _ in bad})
+        in_use = self.list_in_use(self.view)
+        if in_use and not self.direct_mode:
+            hint = ("They are on the bypass list, so they are going around the VPN. "
+                    "Press space to turn a rule off and send it through the VPN instead.")
+        elif in_use and self.direct_mode:
+            hint = ("They are on the VPN list, so they are going through the VPN. "
+                    "Press space to turn a rule off and let it go direct instead.")
+        else:
+            hint = "This list is not in use in this mode, so they took the default path."
+        self.log_line(f"{len(bad)} of {total} did not answer: "
+                      f"{escape(', '.join(names[:4]))}"
+                      f"{'\u2026' if len(names) > 4 else ''}. {hint}", "bold yellow")
+        self.notify(f"{len(bad)} of {total} did not answer: {', '.join(names[:3])}"
+                    f"{'…' if len(names) > 3 else ''}. {hint}",
+                    severity="warning", title="Not reachable", timeout=14)
+
     def action_add_service(self) -> None:
         self.log_line("loading published service ranges", "dim")
         self._add_service(self.view)

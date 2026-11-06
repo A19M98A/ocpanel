@@ -372,3 +372,62 @@ def tunnel_provider() -> Provider | None:
     if tunnel is not None:
         return Provider(kind="unknown", name=tunnel.iface, iface=tunnel.iface)
     return None
+
+
+# ------------------------------------------------------------------- probing
+#
+# A route being correct does not mean the target answers over it. Some networks
+# accept the TCP connection and then drop the traffic, so a plain connect test
+# reports success for a site that never loads. Completing a TLS handshake is
+# what separates "reachable" from "intercepted".
+
+@dataclass
+class Probe:
+    ok: bool
+    detail: str
+    seconds: float = 0.0
+    iface: str = ""
+
+
+def probe(target: str, port: int = 443, timeout: float = 8.0,
+          tls_host: str | None = None) -> Probe:
+    """Open a real connection to `target` the way the routing table sends it."""
+    import socket
+    import ssl
+    iface = route_iface(target)
+    start = time.monotonic()
+    try:
+        sock = socket.create_connection((target, port), timeout=timeout)
+    except OSError as exc:
+        return Probe(False, f"no connection ({exc.strerror or exc})",
+                     time.monotonic() - start, iface)
+    try:
+        if port == 443:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False          # we are testing reach, not identity
+            ctx.verify_mode = ssl.CERT_NONE
+            with ctx.wrap_socket(sock, server_hostname=tls_host or None) as tls:
+                tls.do_handshake()
+                return Probe(True, f"TLS ok ({tls.version()})",
+                             time.monotonic() - start, iface)
+        sock.sendall(b"HEAD / HTTP/1.0\r\n\r\n")
+        got = sock.recv(16)
+        if not got:
+            return Probe(False, "connected, then no reply",
+                         time.monotonic() - start, iface)
+        return Probe(True, "answered", time.monotonic() - start, iface)
+    except (OSError, ssl.SSLError) as exc:
+        if isinstance(exc, (TimeoutError, socket.timeout)):
+            # Accepted the connection and then went quiet: the signature of a
+            # middlebox sitting in front of the real server.
+            reason = "connected, then silence (intercepted?)"
+        elif port == 443:
+            reason = f"TLS handshake failed ({exc})"
+        else:
+            reason = f"connection dropped ({getattr(exc, 'strerror', None) or exc})"
+        return Probe(False, reason, time.monotonic() - start, iface)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
