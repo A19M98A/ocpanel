@@ -86,6 +86,11 @@ def parse_routes(text: str, macos: bool | None = None) -> list[tuple[str, str, s
         f = line.split()
         if not f:
             continue
+        # A route whose link is down cannot carry anything, and offering one as a
+        # bypass gateway would silently black-hole the traffic. Machines with a
+        # spare bridge or USB interface have these sitting in the table.
+        if "linkdown" in f:
+            continue
         dest = f[0]
         gateway = f[f.index("via") + 1] if "via" in f else ""
         iface = f[f.index("dev") + 1] if "dev" in f else ""

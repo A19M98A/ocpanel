@@ -77,8 +77,35 @@ if [ ! -x "$PREFIX/venv/bin/python" ]; then
   python3 -m venv "$PREFIX/venv" || {
     echo "could not create a virtualenv. $(install_hint python3-venv)" >&2; exit 1; }
 fi
-"$PREFIX/venv/bin/pip" -q install --upgrade pip
-"$PREFIX/venv/bin/pip" -q install "textual>=1.0"
+# A slow or filtered path to PyPI is common; be patient rather than failing at
+# the default 15-second read timeout.
+PIP="$PREFIX/venv/bin/pip"
+PIP_ARGS=(--timeout 60 --retries 5)
+# Set OCPANEL_WHEELS to a directory of wheels to install without PyPI at all:
+#   pip download "textual>=1.0" -d wheels --only-binary :all:   # on a machine that can
+#   OCPANEL_WHEELS=wheels ./install.sh                          # on the one that cannot
+if [ -n "${OCPANEL_WHEELS:-}" ]; then
+  echo "installing Textual from $OCPANEL_WHEELS (no PyPI)"
+  "$PIP" -q install --no-index --find-links "$OCPANEL_WHEELS" "textual>=1.0" || {
+    echo "could not install Textual from $OCPANEL_WHEELS" >&2; exit 1; }
+else
+  # Upgrading pip is a nicety, not a requirement - never fail the install for it.
+  "$PIP" -q install "${PIP_ARGS[@]}" --upgrade pip >/dev/null 2>&1 \
+    || echo "  note: could not upgrade pip, carrying on with the one in the venv"
+  "$PIP" -q install "${PIP_ARGS[@]}" "textual>=1.0" || {
+    cat >&2 <<'HELP'
+could not download Textual from PyPI.
+
+If PyPI is slow or blocked from this machine, fetch the wheels somewhere that
+can reach it and install from them instead - they are pure Python, so wheels
+from any OS work anywhere:
+
+    pip download "textual>=1.0" -d wheels --only-binary :all:   # machine with access
+    scp -r wheels user@this-host:~/                             # copy them over
+    OCPANEL_WHEELS=~/wheels ./install.sh                        # run this again
+HELP
+    exit 1; }
+fi
 
 cat > "$BIN/ocpanel" <<LAUNCH
 #!/usr/bin/env bash

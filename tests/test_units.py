@@ -594,6 +594,7 @@ default            172.30.36.1        UGScg          en1
 """
 
 IP_ROUTE = """default via 192.168.1.1 dev eth0 proto dhcp metric 100
+default via 192.168.55.100 dev l4tbr0 metric 32766 linkdown
 0.0.0.0/1 dev tun0 scope link
 10.10.34.36 via 192.168.1.1 dev eth0
 128.0.0.0/1 dev tun0 scope link
@@ -614,6 +615,13 @@ class TestPlatformRoutes(unittest.TestCase):
         rows = plat.parse_routes(IP_ROUTE, macos=False)
         self.assertIn(("default", "192.168.1.1", "eth0"), rows)
         self.assertIn(("128.0.0.0/1", "", "tun0"), rows)       # dev-only, no gateway
+
+    def test_a_downed_link_is_not_offered_as_a_route(self):
+        # Sending a bypass rule down a dead interface black-holes it silently.
+        rows = plat.parse_routes(IP_ROUTE, macos=False)
+        self.assertNotIn("l4tbr0", [iface for _, _, iface in rows])
+        self.assertEqual([r for r in rows if r[0] == "default"],
+                         [("default", "192.168.1.1", "eth0")])
 
     def test_both_find_the_same_halves(self):
         for text, macos in ((NETSTAT, True), (IP_ROUTE, False)):
